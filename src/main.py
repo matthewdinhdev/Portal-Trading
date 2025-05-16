@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
@@ -9,6 +9,7 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.requests import (
     GetOrdersRequest,
     OrderRequest,
+    GetCalendarRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce
 from dotenv import load_dotenv
@@ -17,9 +18,19 @@ import llm
 import discord_bot
 from logger import setup_logger
 from typing import Dict, List, Optional, Any
+import pytz
+import argparse
 
 # Set up logger
 logger = setup_logger("paper_trading.log")
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description="Run the trading bot with optional market hours bypass.")
+parser.add_argument(
+    "--bypass-market-hours", action="store_true", help="Bypass market hours check to allow trading at any time"
+)
+parser.add_argument("--symbols", type=str, help='Comma-separated list of symbols to trade (e.g., "SPY,AAPL,NVDA")')
+args = parser.parse_args()
 
 # Load environment variables
 load_dotenv()
@@ -60,12 +71,115 @@ TRADING_STRATEGY: Dict[str, Any] = {
     "lookback_periods": 120,  # 5 days of hourly data
 }
 
+# Override symbols if provided via command line
+if args.symbols:
+    TRADING_STRATEGY["symbols"] = [symbol.strip().upper() for symbol in args.symbols.split(",")]
+    logger.info(f"Using custom symbol list: {TRADING_STRATEGY['symbols']}")
+
 if not API_KEY or not SECRET_KEY:
     raise ValueError("Please set ALPACA_API_KEY and ALPACA_SECRET_KEY in your .env file")
 
 # Initialize trading client based on environment
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=PAPER_TRADING)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+
+# Cache for market calendar
+_market_calendar_cache = None
+_last_calendar_update = None
+_calendar_cache_duration = timedelta(hours=1)  # Update calendar cache every hour
+
+
+def get_market_calendar() -> Optional[List[Dict[str, Any]]]:
+    """Get market calendar from Alpaca API with caching.
+
+    Returns:
+        Optional[List[Dict[str, Any]]]: List of dictionaries containing market session information.
+            Returns None if there's an error.
+    """
+    global _market_calendar_cache, _last_calendar_update
+
+    # Use timezone-aware datetime
+    current_time = datetime.now(timezone.utc)
+
+    # Return cached calendar if it's still valid
+    if (
+        _market_calendar_cache is not None
+        and _last_calendar_update is not None
+        and current_time - _last_calendar_update < _calendar_cache_duration
+    ):
+        return _market_calendar_cache
+
+    try:
+        # Get calendar for the next 30 days
+        start_date = current_time.date()
+        end_date = start_date + timedelta(days=30)
+
+        # Create calendar request with date filters
+        calendar_request = GetCalendarRequest(start=start_date, end=end_date)
+
+        # Get calendar using the request
+        calendar = trading_client.get_calendar(filters=calendar_request)
+
+        # Update cache
+        _market_calendar_cache = calendar
+        _last_calendar_update = current_time
+
+        return calendar
+    except Exception as e:
+        logger.error(f"Error getting market calendar: {str(e)}")
+        return None
+
+
+def is_market_open() -> bool:
+    """Check if the market is open at the given time.
+
+    Args:
+        current_time: The datetime to check market status for.
+
+    Returns:
+        bool: True if market is open, False otherwise.
+    """
+    # If bypass flag is set, always return True
+    if args.bypass_market_hours:
+        logger.info(" . Market hours check bypassed")
+        return True
+
+    logger.info(" . Checking if market is open")
+
+    try:
+        # Get current market clock
+        clock = trading_client.get_clock()
+
+        # Log market status
+        logger.info(f" . Market is {'open' if clock.is_open else 'closed'}")
+        logger.info(f" . Next market open: {clock.next_open.strftime('%Y-%m-%d %H:%M:%S %Z')} (ET)")
+        logger.info(f" . Next market close: {clock.next_close.strftime('%Y-%m-%d %H:%M:%S %Z')} (ET)")
+
+        return clock.is_open
+    except Exception as e:
+        logger.error(f" . Error getting market clock: {str(e)}")
+        return False
+
+
+def get_next_market_open() -> Optional[datetime]:
+    """Get the next market open time.
+
+    Args:
+
+        current_time: The current datetime.
+
+    Returns:
+        Optional[datetime]: The next market open datetime, or None if there's an error.
+    """
+    try:
+        # Get current market clock
+        clock = trading_client.get_clock()
+
+        # Return next market open time
+        return clock.next_open
+    except Exception as e:
+        logger.error(f" . Error getting next market open: {str(e)}")
+        return None
 
 
 def get_account_info() -> Optional[Dict[str, Any]]:
@@ -145,146 +259,32 @@ def execute_trade(
     symbol: str,
     side: str,
     qty: float,
-    stop_loss: Optional[float] = None,
-    take_profit: Optional[float] = None,
+    stop_loss: float,
+    take_profit: float,
     trade_type: str = "day",
 ) -> Optional[Dict[str, Any]]:
-    """Execute a trade with optional stop loss and take profit orders.
-
-    Args:
-        symbol: The trading symbol (e.g., 'AAPL').
-        side: The side of the trade ('BUY' or 'SELL').
-        qty: The quantity of shares to trade.
-        stop_loss: Optional stop loss price.
-        take_profit: Optional take profit price.
-        trade_type: Type of trade ('day' or 'gtc').
-
-    Returns:
-        Optional[Dict[str, Any]]: Dictionary containing trade execution details including
-            order status, filled price, and timestamps. Returns None if there's an error.
-    """
-    logger.info(f"Executing {side.upper()} trade for {symbol}")
-    logger.info(". Order details:")
-    logger.info(f"  . Symbol: {symbol}")
-    logger.info(f"  . Side: {side}")
-    logger.info(f"  . Quantity: {qty}")
-    logger.info(f"  . Stop Loss: {stop_loss}")
-    logger.info(f"  . Take Profit: {take_profit}")
-    logger.info(f"  . Trade Type: {trade_type}")
+    """Execute a trade with stop loss and take profit orders."""
+    logger.info(f" . Executing {side.upper()} trade for {symbol}")
+    logger.info(f"   . Quantity: {qty}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
 
     try:
-        # Cancel any existing orders for this symbol
-        logger.info(". Canceling existing orders")
-        try:
-            filter = GetOrdersRequest(symbols=[symbol], status="open")
-            existing_orders = trading_client.get_orders(filter=filter)
-            for order in existing_orders:
-                trading_client.cancel_order_by_id(order.id)
-        except Exception as e:
-            logger.warning(f". Error canceling existing orders: {str(e)}")
-
-        # Get current price to validate stop loss and take profit levels
-        try:
-            # Get the most recent price using 1-minute bars
-            end_date = datetime.now()
-            start_date = end_date - timedelta(minutes=1)
-            request_params = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame.Minute,
-                start=start_date,
-                end=end_date,
-                limit=1,  # Only get the most recent bar
-            )
-            bars = data_client.get_stock_bars(request_params)
-            current_price = float(bars.df["close"].iloc[-1])
-            logger.info(f"  . Current price from latest bar: ${current_price:.4f}")
-        except Exception as e:
-            logger.error(f". Error getting current price: {str(e)}")
-            return None
-
-        # Convert stop loss and take profit to float if they exist
-        if stop_loss is not None:
-            stop_loss = float(stop_loss)
-        if take_profit is not None:
-            take_profit = float(take_profit)
-
-        # Create the main order request
+        stop_loss = round(float(stop_loss), 2)
+        take_profit = round(float(take_profit), 2)
         order_request = OrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
             type="market",
             time_in_force=TimeInForce.DAY if trade_type == "day" else TimeInForce.GTC,
-            order_class="bracket" if (stop_loss or take_profit) else "simple",
+            order_class="bracket",
+            stop_loss={"stop_price": stop_loss, "limit_price": stop_loss},
+            take_profit={"limit_price": take_profit},
         )
 
-        # If we have stop loss or take profit, create a bracket order
-        if stop_loss or take_profit:
-            # Set stop loss if provided
-            if stop_loss is not None:
-                # For stop loss orders, we need to set both stop_price and limit_price
-                # The stop_price is the trigger price, and limit_price is the execution price
-                if side.lower() == "sell":
-                    # For SELL orders:
-                    # - stop_price must be higher than current price
-                    # - limit_price must be higher than stop_price
-                    stop_loss_price = round(stop_loss, 2)
-                    stop_loss_limit = round(stop_loss + 0.01, 2)
-                else:
-                    # For BUY orders:
-                    # - stop_price must be lower than current price
-                    # - limit_price must be lower than stop_price
-                    stop_loss_price = round(stop_loss, 2)
-                    stop_loss_limit = round(stop_loss - 0.01, 2)
-
-                order_request.stop_loss = {
-                    "stop_price": stop_loss_price,
-                    "limit_price": stop_loss_limit,
-                }
-
-            # Set take profit if provided
-            if take_profit is not None:
-                take_profit = round(take_profit, 2)
-                order_request.take_profit = {
-                    "limit_price": take_profit,
-                }
-
-        # Submit the order
-        logger.info(". Submitting order")
         order = trading_client.submit_order(order_request)
-
-        # Log bracket order details at debug level
-        if order.order_class == "bracket" and hasattr(order, "legs") and order.legs:
-            logger.debug(". Bracket Order Legs:")
-            for i, leg in enumerate(order.legs, 1):
-                logger.debug(f"  Leg {i}:")
-                logger.debug(f"    . ID: {leg.id}")
-                logger.debug(f"    . Type: {leg.type}")
-                logger.debug(f"    . Side: {leg.side}")
-                logger.debug(f"    . Status: {leg.status}")
-                logger.debug(f"    . Limit Price: {leg.limit_price}")
-                logger.debug(f"    . Stop Price: {leg.stop_price}")
-                logger.debug(f"    . Quantity: {leg.qty}")
-                logger.debug(f"    . Filled Quantity: {leg.filled_qty}")
-                logger.debug(f"    . Filled Avg Price: {leg.filled_avg_price}")
-                logger.debug(f"    . Created At: {leg.created_at}")
-                logger.debug(f"    . Updated At: {leg.updated_at}")
-
-        # Wait for the order to fill
-        logger.info(". Waiting for order to fill")
         order = trading_client.get_order_by_id(order.id)
 
-        # Log the order response
-        logger.info(". Order Response Details:")
-        logger.info(f"  . Order ID: {order.id}")
-        logger.info(f"  . Status: {order.status}")
-        logger.info(f"  . Created At: {order.created_at}")
-        logger.info(f"  . Updated At: {order.updated_at}")
-        logger.info(f"  . Filled At: {order.filled_at}")
-        logger.info(f"  . Filled Avg Price: {order.filled_avg_price}")
-
-        # Create response dictionary
-        trade_details = {
+        return {
             "symbol": symbol,
             "side": side,
             "quantity": qty,
@@ -293,17 +293,11 @@ def execute_trade(
             "filled_avg_price": float(order.filled_avg_price) if order.filled_avg_price else None,
             "environment": "PAPER" if PAPER_TRADING else "LIVE",
             "trade_type": trade_type,
+            "price_targets": {"stop_loss": stop_loss, "take_profit": take_profit},
         }
 
-        # Add stop loss and take profit if provided
-        if stop_loss is not None or take_profit is not None:
-            trade_details["price_targets"] = {"stop_loss": stop_loss, "take_profit": take_profit}
-
-        logger.info(". Trade executed successfully")
-        return trade_details
-
     except Exception as e:
-        logger.error(f". Error executing trade: {str(e)}")
+        logger.error(f"Error executing trade: {str(e)}")
         return None
 
 
@@ -337,116 +331,55 @@ def get_historical_data(
     return df
 
 
-def execute_trading_decision(
-    symbol: str,
-    analysis: Dict[str, Any],
-    account_info: Dict[str, Any],
-    existing_position: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Execute trading decision based on analysis and account information.
-
-    Args:
-        symbol: The trading symbol to execute the trade for.
-        analysis: Dictionary containing trading analysis and recommendations.
-        account_info: Dictionary containing account information and balances.
-        existing_position: Optional dictionary containing existing position details.
-    """
+def execute_trading_decision(symbol: str, analysis: Dict[str, Any], account_info: Dict[str, Any]) -> None:
+    """Execute trading decision based on analysis and account information."""
     logger.info(f"Executing trading decision for {symbol}")
 
-    # Skip if we have a position and the recommendation doesn't match our position
-    if existing_position:
-        if existing_position["qty"] > 0 and analysis["recommendation"] == "BUY":
-            logger.info(". Skipping BUY recommendation as we already have a long position")
-            return
-        elif existing_position["qty"] < 0 and analysis["recommendation"] == "SELL":
-            logger.info(". Skipping SELL recommendation as we already have a short position")
-            return
+    # Get price targets from analysis
+    price_targets = analysis["price_targets"]
+    stop_loss = price_targets["stop_loss"]
+    take_profit = price_targets["take_profit"]
 
-    # Calculate position size
-    position_value = account_info["equity"] * analysis["position_size"]
-    trade_type = analysis["trade_type"]
-
-    # Get current price
+    # Get current price for Discord message
     try:
         request_params = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame.Minute,
-            start=datetime.now() - timedelta(minutes=5),
+            start=datetime.now() - timedelta(minutes=1),
             end=datetime.now(),
         )
         bars = data_client.get_stock_bars(request_params)
         current_price = float(bars.df["close"].iloc[-1])
     except Exception as e:
-        logger.error(f". Error getting current price: {str(e)}")
-        return
-
-    qty = int(position_value / current_price)
-
-    # Validate position size
-    if qty <= 0:
-        logger.warning(f". Calculated position size ({qty}) is invalid. Minimum position size is 1 share.")
-        return
-
-    # Check if we have enough buying power
-    if position_value > account_info["buying_power"]:
-        logger.warning(
-            f". Insufficient buying power. Required: ${position_value:.2f}, Available: ${account_info['buying_power']:.2f}"
-        )
+        logger.error(f"Error getting current price: {str(e)}")
         return
 
     # Execute the trade
     trade_result = execute_trade(
         symbol=symbol,
         side=analysis["recommendation"],
-        qty=qty,
-        trade_type=trade_type,
-        stop_loss=analysis["price_targets"]["stop_loss"],
-        take_profit=analysis["price_targets"]["take_profit"],
+        qty=1,  # Fixed quantity for now
+        trade_type=analysis["trade_type"],
+        stop_loss=stop_loss,
+        take_profit=take_profit,
     )
 
     # Send to Discord if trade was executed
-    if trade_result:
-        logger.info("Sending analysis to Discord")
-        if discord_bot.send_to_discord(analysis, symbol, current_price):
-            logger.info(" . Successfully sent to Discord")
-        else:
-            logger.error(". Failed to send to Discord")
+    if trade_result and discord_bot.send_to_discord(analysis, symbol, current_price):
+        logger.info("Successfully sent to Discord")
 
 
 def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
-    """Analyze a single symbol and return analysis results.
-
-    Args:
-        symbol: The trading symbol to analyze.
-
-    Returns:
-        Optional[Dict[str, Any]]: Dictionary containing analysis results, account info,
-            and existing position details if a trading recommendation is made.
-            Returns None if no recommendation or if there's an error.
-    """
+    """Analyze a single symbol and return analysis results."""
     logger.info(f"Analyzing {symbol}")
     try:
-        # Get account information
         account_info = get_account_info()
-
-        # Get current positions
-        positions = get_current_positions()
-
-        # Check for existing position in this symbol
-        existing_position = next((pos for pos in positions if pos["symbol"] == symbol), None)
-        if existing_position:
-            logger.info(f". Found existing position in {symbol}:")
-            logger.info(f"  . Quantity: {existing_position['qty']}")
-            logger.info(f"  . Entry Price: ${existing_position['avg_entry_price']:.2f}")
-            logger.info(f"  . Current Price: ${existing_position['current_price']:.2f}")
-            logger.info(
-                f"  . Unrealized P/L: ${existing_position['unrealized_pl']:.2f} ({existing_position['unrealized_plpc']*100:+.2f}%)"
-            )
+        if not account_info:
+            return None
 
         # Check for existing analysis from this hour
         existing_analysis = llm.get_existing_analysis(symbol)
         if existing_analysis:
-            logger.info(". Using existing analysis from this hour")
             analysis = existing_analysis
         else:
             # Get historical data
@@ -454,25 +387,16 @@ def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
             start_date = end_date - timedelta(hours=TRADING_STRATEGY["lookback_periods"])
             df = get_historical_data(symbol, start_date, end_date, TRADING_STRATEGY["timeframe"])
 
-            # Calculate indicators
-            logger.info(" . Calculating technical indicators")
+            # Calculate indicators and get analysis
             df = strategies.calculate_indicators(df)
-
-            # Generate LLM prompt for the current market conditions
-            logger.info(" . Generating LLM prompt")
-            llm_prompt = strategies.get_llm_prompt(df, account_info, positions)
+            llm_prompt = strategies.get_llm_prompt(df, account_info, get_current_positions())
             if not llm_prompt:
-                logger.error(". Failed to generate LLM prompt")
                 return None
 
-            # Get LLM analysis
-            logger.info(" . Getting LLM analysis")
             analysis = llm.get_trading_analysis(llm_prompt)
             if not analysis:
-                logger.error(". Failed to get LLM analysis")
                 return None
 
-            # Save the analysis
             llm.save_analysis(analysis, symbol)
 
         # Return analysis results if there's a trading recommendation
@@ -481,38 +405,12 @@ def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
                 "symbol": symbol,
                 "analysis": analysis,
                 "account_info": account_info,
-                "existing_position": existing_position,
             }
         return None
 
     except Exception as e:
-        logger.error(f". Error analyzing symbol {symbol}: {str(e)}")
+        logger.error(f"Error analyzing symbol {symbol}: {str(e)}")
         return None
-
-
-def is_market_open(current_time: datetime) -> bool:
-    """Check if the market is open at the given time.
-
-    Args:
-        current_time: The datetime to check market status for.
-
-    Returns:
-        bool: True if market is open, False otherwise.
-    """
-    logger.info(f" . Checking if market is open at {current_time}")
-    # Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
-    market_open = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = current_time.replace(hour=16, minute=0, second=0, microsecond=0)
-
-    # Check if it's a weekday
-    if current_time.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-        logger.info(". Market is closed (weekend)")
-        return False
-
-    # Check if current time is within market hours
-    is_open = market_open <= current_time <= market_close
-    logger.info(f". Market is {'open' if is_open else 'closed'} (within market hours)")
-    return is_open
 
 
 def display_position_updates() -> None:
@@ -542,57 +440,58 @@ def display_position_updates() -> None:
 
 
 def main() -> None:
-    """Main function to run the trading bot.
-
-    Continuously monitors market conditions and executes trades based on analysis.
-    Updates positions every 10 minutes during market hours.
-    Handles market open/close times and error conditions.
-    """
+    """Main function to run the trading bot."""
     logger.info("Starting trading bot...")
 
     while True:
         try:
-            current_time = datetime.now()
-            logger.info(f"Checking market conditions at {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
             # Calculate next run time (5 minutes after the next hour)
+            current_time = datetime.now(timezone.utc)
             next_run = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1, minutes=5)
             wait_seconds = (next_run - current_time).total_seconds()
 
             # Check if market is open
-            if not is_market_open(current_time):
-                logger.info("Market is closed. Waiting until next run time...")
-                time.sleep(wait_seconds)
+            if not is_market_open():
+                next_market_open = get_next_market_open()
+                if next_market_open:
+                    wait_seconds = (next_market_open - current_time).total_seconds()
+                    if wait_seconds > 0:
+                        logger.info(
+                            f"Market is closed. Waiting {wait_seconds/3600:.1f} hours until next market open..."
+                        )
+                        time.sleep(wait_seconds)
+                    else:
+                        time.sleep(300)
+                else:
+                    time.sleep(300)
                 continue
 
-            # Analyze each symbol and execute trades immediately
+            # Analyze each symbol and execute trades
             for symbol in TRADING_STRATEGY["symbols"]:
                 result = analyze_symbol(symbol)
                 if result:
-                    execute_trading_decision(
-                        result["symbol"], result["analysis"], result["account_info"], result["existing_position"]
-                    )
+                    execute_trading_decision(result["symbol"], result["analysis"], result["account_info"])
 
-            # Display initial position update
-            display_position_updates()
+            # Show position updates every 10 minutes
+            wait_start = datetime.now(timezone.utc)
+            while (datetime.now(timezone.utc) - wait_start).total_seconds() < wait_seconds:
+                display_position_updates()
+                if not is_market_open():
+                    logger.info("Market is closed. Breaking wait loop...")
+                    break
 
-            # During the wait time, show position updates every 10 minutes
-            wait_start = datetime.now()
-            while (datetime.now() - wait_start).total_seconds() < wait_seconds:
-                remaining = wait_seconds - (datetime.now() - wait_start).total_seconds()
+                remaining = wait_seconds - (datetime.now(timezone.utc) - wait_start).total_seconds()
                 minutes = int(remaining // 60)
                 seconds = int(remaining % 60)
                 logger.info(f"Waiting {minutes} minutes and {seconds} seconds until next run time...")
-                time.sleep(600)  # Sleep for 10 minutes
-                if is_market_open(datetime.now()):  # Only show updates during market hours
-                    display_position_updates()
+                time.sleep(600)
 
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt. Exiting...")
             break
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
-            time.sleep(60)  # Wait a minute before retrying
+            time.sleep(60)
 
 
 if __name__ == "__main__":
