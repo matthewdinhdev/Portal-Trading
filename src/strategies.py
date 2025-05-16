@@ -146,18 +146,13 @@ def rsi_strategy(df: pd.DataFrame, initial_capital: float = 100000) -> pd.DataFr
 
 
 def format_for_llm(
-    df: pd.DataFrame, lookback_periods: int = 20, analysis_date: Optional[datetime] = None
+    df: pd.DataFrame, lookback_periods: int = 48, analysis_date: Optional[datetime] = None
 ) -> List[Dict[str, Any]]:
     """
     Format the data for LLM consumption.
     Returns a list of dictionaries, where each dictionary represents a time period
     with its indicators and market context.
     """
-    df = df.copy()
-
-    # Ensure we have all necessary indicators
-    df = calculate_indicators(df)
-
     # If analysis_date is provided, filter data to that date
     if analysis_date is not None:
         if isinstance(analysis_date, datetime):
@@ -183,10 +178,13 @@ def format_for_llm(
         # Calculate multi-period changes safely
         price_change_5h = 0.0
         price_change_20h = 0.0
+        price_change_48h = 0.0
         if i >= 5:
             price_change_5h = float(df["close"].iloc[i] / df["close"].iloc[i - 5] - 1)
         if i >= 20:
             price_change_20h = float(df["close"].iloc[i] / df["close"].iloc[i - 20] - 1)
+        if i >= 48:
+            price_change_48h = float(df["close"].iloc[i] / df["close"].iloc[i - 48] - 1)
 
         current_data = {
             "timestamp": df.index[i].strftime("%Y-%m-%d %H:%M"),
@@ -196,7 +194,12 @@ def format_for_llm(
                 "low": float(df["low"].iloc[i]),
                 "close": float(current_price),
                 "volume": float(df["volume"].iloc[i]),
-                "price_changes": {"1h": price_change_1h, "5h": price_change_5h, "20h": price_change_20h},
+                "price_changes": {
+                    "1h": price_change_1h,
+                    "5h": price_change_5h,
+                    "20h": price_change_20h,
+                    "48h": price_change_48h,
+                },
             },
             "trend_indicators": {
                 "sma_20": float(df["SMA_20"].iloc[i]),
@@ -228,6 +231,7 @@ def format_for_llm(
                 "price_change_1h": price_change_1h,
                 "price_change_5h": price_change_5h,
                 "price_change_20h": price_change_20h,
+                "price_change_48h": price_change_48h,
                 "momentum": float(df["momentum"].iloc[i]),
                 "rate_of_change": float(df["rate_of_change"].iloc[i]),
             },
@@ -245,7 +249,7 @@ def format_for_llm(
                     "overbought" if df["RSI"].iloc[i] > 70 else "oversold" if df["RSI"].iloc[i] < 30 else "neutral"
                 ),
                 "trend_strength": (
-                    "strong" if abs(price_change_20h) > 0.1 else "moderate" if abs(price_change_20h) > 0.05 else "weak"
+                    "strong" if abs(price_change_48h) > 0.1 else "moderate" if abs(price_change_48h) > 0.05 else "weak"
                 ),
             },
         }
@@ -278,12 +282,12 @@ def get_llm_prompt(
     df: pd.DataFrame,
     account_info: Optional[Dict[str, Any]] = None,
     positions: Optional[List[Dict[str, Any]]] = None,
-    lookback_periods: int = 20,
+    lookback_periods: int = 48,
     analysis_date: Optional[datetime] = None,
 ) -> Optional[str]:
     """
     Generate a prompt for the LLM based on the current market conditions.
-    Uses 20 periods of historical data by default.
+    Uses 48 periods of historical data by default.
     """
     try:
         if df.empty:
@@ -302,8 +306,8 @@ def get_llm_prompt(
         current = llm_data[-1]
 
         # Calculate support and resistance levels safely
-        recent_lows = [period["close"] for period in current["previous_periods"][:10] if "close" in period]
-        recent_highs = [period["close"] for period in current["previous_periods"][:10] if "close" in period]
+        recent_lows = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
+        recent_highs = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
 
         if not recent_lows or not recent_highs:
             raise ValueError("Insufficient data for support/resistance calculation")
@@ -315,11 +319,11 @@ def get_llm_prompt(
         atr = current["volatility_indicators"]["atr"]
         current_price = current["price_data"]["close"]
         stop_loss_level = current_price - (2 * atr)  # 2 ATR below current price
-        take_profit_level = current_price + (4 * atr)  # 4 ATR above current price
+        take_profit_level = current_price + (4 * atr)
 
         # Format the prompt with clear sections and better readability
         prompt = [
-            f"Trading Analysis ({analysis_date.strftime('%Y-%m-%d')})",
+            f"Trading Analysis ({analysis_date.strftime('%Y-%m-%d') if analysis_date else datetime.now().strftime('%Y-%m-%d')})",
             "=" * 40,
             "",
             "Based on the following market data and account information, provide a trading signal (BUY, SELL, or HOLD) and explain your reasoning:",
@@ -370,6 +374,7 @@ def get_llm_prompt(
                 f"- Hourly Change: {current['price_data']['price_changes']['1h']*100:+.2f}%",
                 f"- 5-Hour Change: {current['price_data']['price_changes']['5h']*100:+.2f}%",
                 f"- 20-Hour Change: {current['price_data']['price_changes']['20h']*100:+.2f}%",
+                f"- 48-Hour Change: {current['price_data']['price_changes']['48h']*100:+.2f}%",
                 "",
                 "Price Levels:",
                 f"- Support Level: ${support_level:.2f}",
@@ -394,12 +399,12 @@ def get_llm_prompt(
                 f"- RSI State: {current['historical_context']['rsi_state']}",
                 f"- Trend Strength: {current['historical_context']['trend_strength']}",
                 "",
-                "Recent Price History (Last 5 Hours):",
+                "Recent Price History (Last 48 Hours):",
             ]
         )
 
-        # Add recent price history (last 5 hours)
-        for period in current["previous_periods"][:5]:
+        # Add recent price history (last 48 hours)
+        for period in current["previous_periods"][:48]:
             prompt.append(
                 f"- {period['timestamp']}: ${period['close']:.2f} "
                 f"(RSI: {period['rsi']:.2f}, MACD: {period['macd']:.2f})"
@@ -425,10 +430,12 @@ def get_llm_prompt(
             ]
         )
 
-        return "\n".join(prompt)
+        final_prompt = "\n".join(prompt)
+        logger.debug("Generated LLM prompt:\n%s", final_prompt)
+        return final_prompt
 
     except Exception as e:
-        print(f"Error generating LLM prompt: {str(e)}")
+        logger.error(f"Error generating LLM prompt: {str(e)}")
         return None
 
 

@@ -50,8 +50,7 @@ logs/
 *.log
 *.csv
 *.dat
-analysis/output/
-analysis/results/
+analysis/
 
 # Misc
 *.pid
