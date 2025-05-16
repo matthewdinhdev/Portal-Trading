@@ -69,10 +69,19 @@ data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 
 def get_account_info() -> Optional[Dict[str, Any]]:
-    """Get account information from Alpaca"""
+    """Get account information from Alpaca.
+
+    Returns:
+        Optional[Dict[str, Any]]: Dictionary containing account information including equity,
+            cash, buying power, and trading status. Returns None if there's an error.
+    """
     logger.info(" . Getting account information")
     try:
         account = trading_client.get_account()
+
+        if not account:
+            raise Exception("Failed to get account information")
+
         return {
             "equity": float(account.equity),
             "cash": float(account.cash),
@@ -102,7 +111,13 @@ def get_account_info() -> Optional[Dict[str, Any]]:
 
 
 def get_current_positions() -> List[Dict[str, Any]]:
-    """Get current positions from Alpaca"""
+    """Get current positions from Alpaca.
+
+    Returns:
+        List[Dict[str, Any]]: List of dictionaries containing position information for each
+            held position. Each dictionary includes symbol, quantity, entry price, and P/L.
+            Returns empty list if there's an error.
+    """
     logger.info(" . Getting current positions")
     try:
         positions = trading_client.get_all_positions()
@@ -134,7 +149,20 @@ def execute_trade(
     take_profit: Optional[float] = None,
     trade_type: str = "day",
 ) -> Optional[Dict[str, Any]]:
-    """Execute a trade with optional stop loss and take profit orders"""
+    """Execute a trade with optional stop loss and take profit orders.
+
+    Args:
+        symbol: The trading symbol (e.g., 'AAPL').
+        side: The side of the trade ('BUY' or 'SELL').
+        qty: The quantity of shares to trade.
+        stop_loss: Optional stop loss price.
+        take_profit: Optional take profit price.
+        trade_type: Type of trade ('day' or 'gtc').
+
+    Returns:
+        Optional[Dict[str, Any]]: Dictionary containing trade execution details including
+            order status, filled price, and timestamps. Returns None if there's an error.
+    """
     logger.info(f"Executing {side.upper()} trade for {symbol}")
     logger.info(". Order details:")
     logger.info(f"  . Symbol: {symbol}")
@@ -282,7 +310,17 @@ def execute_trade(
 def get_historical_data(
     symbol: str, start_date: datetime, end_date: datetime, timeframe: TimeFrame = TimeFrame.Hour
 ) -> pd.DataFrame:
-    """Get historical data for a symbol"""
+    """Get historical data for a symbol.
+
+    Args:
+        symbol: The trading symbol to get data for.
+        start_date: Start date for historical data.
+        end_date: End date for historical data.
+        timeframe: Timeframe for the data (default: TimeFrame.Hour).
+
+    Returns:
+        pd.DataFrame: DataFrame containing historical price data with datetime index.
+    """
     logger.info(f" . Getting historical data for {symbol}")
     request_params = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, start=start_date, end=end_date)
 
@@ -299,21 +337,99 @@ def get_historical_data(
     return df
 
 
-def analyze_symbol(symbol: str) -> None:
-    """Analyze a single symbol and execute trades if needed"""
+def execute_trading_decision(
+    symbol: str,
+    analysis: Dict[str, Any],
+    account_info: Dict[str, Any],
+    existing_position: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Execute trading decision based on analysis and account information.
+
+    Args:
+        symbol: The trading symbol to execute the trade for.
+        analysis: Dictionary containing trading analysis and recommendations.
+        account_info: Dictionary containing account information and balances.
+        existing_position: Optional dictionary containing existing position details.
+    """
+    logger.info(f"Executing trading decision for {symbol}")
+
+    # Skip if we have a position and the recommendation doesn't match our position
+    if existing_position:
+        if existing_position["qty"] > 0 and analysis["recommendation"] == "BUY":
+            logger.info(". Skipping BUY recommendation as we already have a long position")
+            return
+        elif existing_position["qty"] < 0 and analysis["recommendation"] == "SELL":
+            logger.info(". Skipping SELL recommendation as we already have a short position")
+            return
+
+    # Calculate position size
+    position_value = account_info["equity"] * analysis["position_size"]
+    trade_type = analysis["trade_type"]
+
+    # Get current price
+    try:
+        request_params = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            start=datetime.now() - timedelta(minutes=5),
+            end=datetime.now(),
+        )
+        bars = data_client.get_stock_bars(request_params)
+        current_price = float(bars.df["close"].iloc[-1])
+    except Exception as e:
+        logger.error(f". Error getting current price: {str(e)}")
+        return
+
+    qty = int(position_value / current_price)
+
+    # Validate position size
+    if qty <= 0:
+        logger.warning(f". Calculated position size ({qty}) is invalid. Minimum position size is 1 share.")
+        return
+
+    # Check if we have enough buying power
+    if position_value > account_info["buying_power"]:
+        logger.warning(
+            f". Insufficient buying power. Required: ${position_value:.2f}, Available: ${account_info['buying_power']:.2f}"
+        )
+        return
+
+    # Execute the trade
+    trade_result = execute_trade(
+        symbol=symbol,
+        side=analysis["recommendation"],
+        qty=qty,
+        trade_type=trade_type,
+        stop_loss=analysis["price_targets"]["stop_loss"],
+        take_profit=analysis["price_targets"]["take_profit"],
+    )
+
+    # Send to Discord if trade was executed
+    if trade_result:
+        logger.info("Sending analysis to Discord")
+        if discord_bot.send_to_discord(analysis, symbol, current_price):
+            logger.info(" . Successfully sent to Discord")
+        else:
+            logger.error(". Failed to send to Discord")
+
+
+def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+    """Analyze a single symbol and return analysis results.
+
+    Args:
+        symbol: The trading symbol to analyze.
+
+    Returns:
+        Optional[Dict[str, Any]]: Dictionary containing analysis results, account info,
+            and existing position details if a trading recommendation is made.
+            Returns None if no recommendation or if there's an error.
+    """
     logger.info(f"Analyzing {symbol}")
     try:
         # Get account information
         account_info = get_account_info()
-        if not account_info:
-            logger.error(". Failed to get account information")
-            return
 
-        # Check if account has sufficient funds
-        if account_info["cash"] <= 0:
-            logger.warning(". Insufficient funds in account. Please add funds to your paper trading account.")
-            return
-
+        # Get current positions
         positions = get_current_positions()
 
         # Check for existing position in this symbol
@@ -347,84 +463,42 @@ def analyze_symbol(symbol: str) -> None:
             llm_prompt = strategies.get_llm_prompt(df, account_info, positions)
             if not llm_prompt:
                 logger.error(". Failed to generate LLM prompt")
-                return
+                return None
 
             # Get LLM analysis
             logger.info(" . Getting LLM analysis")
             analysis = llm.get_trading_analysis(llm_prompt)
             if not analysis:
                 logger.error(". Failed to get LLM analysis")
-                return
+                return None
 
             # Save the analysis
             llm.save_analysis(analysis, symbol)
 
-        # Execute trade if recommended
+        # Return analysis results if there's a trading recommendation
         if analysis["recommendation"] in ["BUY", "SELL"]:
-            # Skip if we have a position and the recommendation doesn't match our position
-            if existing_position:
-                if existing_position["qty"] > 0 and analysis["recommendation"] == "BUY":
-                    logger.info(". Skipping BUY recommendation as we already have a long position")
-                    return
-                elif existing_position["qty"] < 0 and analysis["recommendation"] == "SELL":
-                    logger.info(". Skipping SELL recommendation as we already have a short position")
-                    return
-
-            # Calculate position size
-            position_value = account_info["equity"] * analysis["position_size"]
-            trade_type = analysis["trade_type"]
-
-            # Get current price
-            try:
-                request_params = StockBarsRequest(
-                    symbol_or_symbols=symbol,
-                    timeframe=TimeFrame.Minute,
-                    start=datetime.now() - timedelta(minutes=5),
-                    end=datetime.now(),
-                )
-                bars = data_client.get_stock_bars(request_params)
-                current_price = float(bars.df["close"].iloc[-1])
-            except Exception as e:
-                logger.error(f". Error getting current price: {str(e)}")
-                return
-
-            qty = int(position_value / current_price)
-
-            # Validate position size
-            if qty <= 0:
-                logger.warning(f". Calculated position size ({qty}) is invalid. Minimum position size is 1 share.")
-                return
-
-            # Check if we have enough buying power
-            if position_value > account_info["buying_power"]:
-                logger.warning(
-                    f". Insufficient buying power. Required: ${position_value:.2f}, Available: ${account_info['buying_power']:.2f}"
-                )
-                return
-
-            # Execute the trade
-            execute_trade(
-                symbol=symbol,
-                side=analysis["recommendation"],
-                qty=qty,
-                trade_type=trade_type,
-                stop_loss=analysis["price_targets"]["stop_loss"],
-                take_profit=analysis["price_targets"]["take_profit"],
-            )
-
-        # Send to Discord
-        logger.info("Sending analysis to Discord")
-        if discord_bot.send_to_discord(analysis, symbol, current_price):
-            logger.info(" . Successfully sent to Discord")
-        else:
-            logger.error(". Failed to send to Discord")
+            return {
+                "symbol": symbol,
+                "analysis": analysis,
+                "account_info": account_info,
+                "existing_position": existing_position,
+            }
+        return None
 
     except Exception as e:
         logger.error(f". Error analyzing symbol {symbol}: {str(e)}")
+        return None
 
 
 def is_market_open(current_time: datetime) -> bool:
-    """Check if the market is open"""
+    """Check if the market is open at the given time.
+
+    Args:
+        current_time: The datetime to check market status for.
+
+    Returns:
+        bool: True if market is open, False otherwise.
+    """
     logger.info(f" . Checking if market is open at {current_time}")
     # Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
     market_open = current_time.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -442,7 +516,11 @@ def is_market_open(current_time: datetime) -> bool:
 
 
 def display_position_updates() -> None:
-    """Display current position updates including P/L and current prices"""
+    """Display current position updates including P/L and current prices.
+
+    Logs position information including quantity, entry price, current price,
+    unrealized P/L, and market value for each active position.
+    """
     positions = get_current_positions()
     if not positions:
         logger.info("No active positions")
@@ -464,7 +542,12 @@ def display_position_updates() -> None:
 
 
 def main() -> None:
-    """Main function to run the trading bot"""
+    """Main function to run the trading bot.
+
+    Continuously monitors market conditions and executes trades based on analysis.
+    Updates positions every 10 minutes during market hours.
+    Handles market open/close times and error conditions.
+    """
     logger.info("Starting trading bot...")
 
     while True:
@@ -482,19 +565,25 @@ def main() -> None:
                 time.sleep(wait_seconds)
                 continue
 
-            # Analyze each symbol
+            # Analyze each symbol and execute trades immediately
             for symbol in TRADING_STRATEGY["symbols"]:
-                analyze_symbol(symbol)
+                result = analyze_symbol(symbol)
+                if result:
+                    execute_trading_decision(
+                        result["symbol"], result["analysis"], result["account_info"], result["existing_position"]
+                    )
 
             # Display initial position update
             display_position_updates()
 
-            # During the wait time, show position updates every 20 minutes
+            # During the wait time, show position updates every 10 minutes
             wait_start = datetime.now()
             while (datetime.now() - wait_start).total_seconds() < wait_seconds:
                 remaining = wait_seconds - (datetime.now() - wait_start).total_seconds()
-                logger.info(f"Waiting {remaining:.0f} seconds until next run time...")
-                time.sleep(1200)  # Sleep for 20 minutes
+                minutes = int(remaining // 60)
+                seconds = int(remaining % 60)
+                logger.info(f"Waiting {minutes} minutes and {seconds} seconds until next run time...")
+                time.sleep(600)  # Sleep for 10 minutes
                 if is_market_open(datetime.now()):  # Only show updates during market hours
                     display_position_updates()
 
@@ -503,8 +592,7 @@ def main() -> None:
             break
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
-            logger.info("Waiting 60 seconds before retrying...")
-            time.sleep(60)
+            time.sleep(60)  # Wait a minute before retrying
 
 
 if __name__ == "__main__":

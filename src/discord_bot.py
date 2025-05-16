@@ -16,16 +16,18 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 
 def format_discord_message(analysis, symbol, current_price):
-    """
-    Format the trading analysis into a Discord message with rich formatting.
+    """Format the trading analysis into a Discord message with rich formatting.
+
+    Creates an embed message with color-coded recommendations, position details,
+    price targets, and reasoning for the trading decision.
 
     Args:
-        analysis (dict): The trading analysis from ChatGPT
-        symbol (str): The trading symbol
-        current_price (float): The current price of the symbol
+        analysis: Dictionary containing trading analysis from ChatGPT.
+        symbol: The trading symbol (e.g., 'AAPL').
+        current_price: Current price of the symbol.
 
     Returns:
-        dict: Discord message payload
+        dict: Discord message payload containing formatted embed.
     """
     # Create color based on recommendation
     color_map = {"BUY": 0x00FF00, "SELL": 0xFF0000, "HOLD": 0xFFFF00}  # Green  # Red  # Yellow
@@ -57,16 +59,18 @@ def format_discord_message(analysis, symbol, current_price):
 
 
 def send_to_discord(analysis, symbol, current_price):
-    """
-    Send the trading analysis to Discord via webhook.
+    """Send the trading analysis to Discord via webhook.
+
+    Formats and sends a trading analysis message to a configured Discord channel
+    using a webhook URL.
 
     Args:
-        analysis (dict): The trading analysis from ChatGPT
-        symbol (str): The trading symbol
-        current_price (float): The current price of the symbol
+        analysis: Dictionary containing trading analysis from ChatGPT.
+        symbol: The trading symbol (e.g., 'AAPL').
+        current_price: Current price of the symbol.
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if message was sent successfully, False otherwise.
     """
     if not DISCORD_WEBHOOK_URL:
         logger.warning("DISCORD_WEBHOOK_URL not found in environment variables")
@@ -93,11 +97,17 @@ def send_to_discord(analysis, symbol, current_price):
 
 
 def send_backtest_results(results):
-    """
-    Send backtest results to Discord channel via webhook
+    """Send backtest results to Discord channel via webhook.
+
+    Formats and sends detailed backtest results including metrics, trade summary,
+    and performance statistics to a configured Discord channel.
 
     Args:
-        results (dict): Backtest results dictionary
+        results: Dictionary containing backtest results including metrics,
+            trade history, and performance statistics.
+
+    Raises:
+        Exception: If there's an error sending the message to Discord.
     """
     if not DISCORD_WEBHOOK_URL:
         logger.warning("DISCORD_WEBHOOK_URL not set in environment variables. Skipping Discord notification.")

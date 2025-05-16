@@ -38,7 +38,23 @@ TRADING_STRATEGY: Dict[str, Any] = {
 def get_historical_data(
     symbol: str, start_date: datetime, end_date: datetime, timeframe: TimeFrame = TimeFrame.Hour
 ) -> pd.DataFrame:
-    """Get historical data for a symbol"""
+    """Get historical data for a symbol from Alpaca.
+
+    Retrieves historical price data for the specified symbol and time range,
+    converting dates to UTC if necessary.
+
+    Args:
+        symbol: Trading symbol to get data for.
+        start_date: Start date for historical data.
+        end_date: End date for historical data.
+        timeframe: Timeframe for the data (default: TimeFrame.Hour).
+
+    Returns:
+        pd.DataFrame: DataFrame containing historical price data with datetime index.
+
+    Raises:
+        ValueError: If no historical data is available for the specified date range.
+    """
     # Convert to UTC if not already
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=timezone.utc)
@@ -69,18 +85,24 @@ def run_backtest(
     end_date: Union[str, datetime],
     initial_capital: float = 100000,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Run a backtest for a given symbol and date range using a single random day
+    """Run a backtest for a given symbol and date range using a single random day.
+
+    Simulates trading based on LLM analysis for a randomly selected day within
+    the specified date range, tracking trades, equity, and performance metrics.
 
     Args:
-        symbol: The trading symbol
-        timeframe: Timeframe for the backtest (e.g. "1m", "4h", "1d")
-        start_date: Start date for backtest (string or datetime)
-        end_date: End date for backtest (string or datetime)
-        initial_capital: Initial capital for backtest
+        symbol: Trading symbol to backtest.
+        timeframe: Timeframe for the backtest (e.g., "1m", "4h", "1d").
+        start_date: Start date for backtest (string or datetime).
+        end_date: End date for backtest (string or datetime).
+        initial_capital: Initial capital for backtest (default: 100000).
 
     Returns:
-        Backtest results including performance metrics or None if backtest fails
+        Optional[Dict[str, Any]]: Dictionary containing backtest results including
+            trades, equity curve, and performance metrics, or None if backtest fails.
+
+    Raises:
+        ValueError: If invalid timeframe, insufficient data, or other errors occur.
     """
     try:
         # Convert string dates to datetime if needed
@@ -347,14 +369,17 @@ def run_backtest(
 
 
 def calculate_max_drawdown(equity_curve: Union[pd.Series, List[Dict[str, Any]]]) -> float:
-    """
-    Calculate the maximum drawdown from an equity curve
+    """Calculate the maximum drawdown from an equity curve.
+
+    Computes the largest peak-to-trough decline in the equity curve,
+    expressed as a percentage.
 
     Args:
-        equity_curve: Either a pandas Series of equity values or a list of dicts with 'equity' key
+        equity_curve: Series or list of dictionaries containing equity values
+            over time.
 
     Returns:
-        Maximum drawdown as a percentage
+        float: Maximum drawdown as a percentage (e.g., 0.15 for 15% drawdown).
     """
     # Convert list of dicts to Series if needed
     if isinstance(equity_curve, list):
@@ -380,7 +405,11 @@ def calculate_max_drawdown(equity_curve: Union[pd.Series, List[Dict[str, Any]]])
 
 
 def main() -> None:
-    """Main function to run backtests"""
+    """Main function to run backtests.
+
+    Executes backtests for configured symbols and timeframes, saving results
+    and sending notifications via Discord.
+    """
     # Set date range for backtest
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=30)  # Last 30 days

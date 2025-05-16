@@ -34,8 +34,22 @@ def get_llm_response(
     lookback_periods: int = 20,
     analysis_date: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Get trading analysis from LLM.
+    """Get trading analysis from LLM based on market data and account information.
+
+    Generates a prompt from market data and account information, then sends it to
+    the LLM for analysis. The LLM returns a structured analysis with trading
+    recommendations.
+
+    Args:
+        df: DataFrame containing market data.
+        account_info: Optional dictionary containing account information.
+        positions: Optional list of dictionaries containing current positions.
+        lookback_periods: Number of periods to look back for analysis (default: 20).
+        analysis_date: Optional datetime for the analysis (default: current time).
+
+    Returns:
+        Optional[Dict[str, Any]]: Dictionary containing LLM's trading analysis and
+            recommendations, or None if there's an error.
     """
     try:
         # Generate prompt
@@ -77,14 +91,21 @@ def get_llm_response(
 
 
 def get_trading_analysis(prompt: str) -> Optional[Dict[str, Any]]:
-    """
-    Get trading analysis from LLM.
+    """Get trading analysis from LLM based on a formatted prompt.
+
+    Sends a prompt to the LLM and processes its response into a structured trading
+    analysis. Validates the response format and required fields.
 
     Args:
-        prompt (str): The prompt to send to the LLM
+        prompt: Formatted string containing market data and analysis request.
 
     Returns:
-        dict: The LLM's analysis and trading recommendation
+        Optional[Dict[str, Any]]: Dictionary containing validated trading analysis
+            with recommendation, reasoning, price targets, position size, and
+            trade type. Returns None if there's an error.
+
+    Raises:
+        ValueError: If the prompt is invalid or the LLM response is malformed.
     """
     try:
         # Extract the analysis date from the prompt
@@ -199,15 +220,19 @@ def get_trading_analysis(prompt: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def format_analysis_for_display(analysis):
-    """
-    Format the analysis for display.
+def format_analysis_for_display(analysis: Dict[str, Any]) -> str:
+    """Format the trading analysis into a human-readable string.
+
+    Converts the structured analysis dictionary into a formatted string with
+    sections for recommendation, reasoning, price targets, position size,
+    and trade type.
 
     Args:
-        analysis (dict): The analysis to format
+        analysis: Dictionary containing trading analysis and recommendations.
 
     Returns:
-        str: Formatted analysis
+        str: Formatted string representation of the analysis, or "No analysis
+            available" if the input is None.
     """
     if not analysis:
         return "No analysis available"
@@ -252,7 +277,15 @@ def format_analysis_for_display(analysis):
 
 
 def save_analysis(analysis: Dict[str, Any], symbol: str) -> None:
-    """Save analysis to a JSON file"""
+    """Save trading analysis to a JSON file.
+
+    Creates a timestamped JSON file containing the trading analysis in the
+    appropriate analysis directory.
+
+    Args:
+        analysis: Dictionary containing trading analysis and recommendations.
+        symbol: Trading symbol (e.g., 'AAPL') for the analysis.
+    """
     try:
         # Create base directory based on trading mode
         base_dir = "analysis/paper_trading" if PAPER_TRADING else "analysis/live_trading"
@@ -279,15 +312,18 @@ def save_analysis(analysis: Dict[str, Any], symbol: str) -> None:
 
 
 def get_existing_analysis(symbol: str, output_dir: str = "analysis") -> Optional[Dict[str, Any]]:
-    """
-    Get existing analysis for a symbol from the current hour if it exists.
+    """Get existing analysis for a symbol from the most recent JSON file.
+
+    Searches for the most recent analysis file for the given symbol in the
+    specified directory.
 
     Args:
-        symbol (str): The trading symbol
-        output_dir (str): Directory to look for analysis files
+        symbol: Trading symbol (e.g., 'AAPL') to get analysis for.
+        output_dir: Directory to search for analysis files (default: "analysis").
 
     Returns:
-        Optional[Dict[str, Any]]: The existing analysis if found, None otherwise
+        Optional[Dict[str, Any]]: Dictionary containing the most recent analysis
+            for the symbol, or None if no analysis is found.
     """
     try:
         # Determine the output directory based on trading mode

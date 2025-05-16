@@ -4,7 +4,19 @@ from datetime import datetime
 
 
 def setup_logger(log_file="trading.log"):
-    """Set up logging configuration"""
+    """Set up logging configuration with file and console handlers.
+
+    Creates a logger that writes to both a file and console. The log file is stored in
+    a date-stamped file within the appropriate subdirectory (logs/, logs/backtest/, or
+    logs/paper_trading/).
+
+    Args:
+        log_file: Name of the log file (default: "trading.log"). The actual filename
+            will include the current date.
+
+    Returns:
+        logging.Logger: Configured logger instance with file and console handlers.
+    """
     # Create logs directory if it doesn't exist
     log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
     os.makedirs(log_dir, exist_ok=True)
