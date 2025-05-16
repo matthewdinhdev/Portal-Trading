@@ -39,7 +39,7 @@ def get_llm_response(
     """
     try:
         # Generate prompt
-        prompt = get_llm_prompt(df, account_info, positions, lookback_periods, analysis_date)
+        prompt = format_for_llm(df, account_info, positions, lookback_periods, analysis_date)
         if not prompt:
             logger.error("Failed to generate LLM prompt")
             return None
@@ -105,12 +105,27 @@ def get_trading_analysis(prompt: str) -> Optional[Dict[str, Any]]:
                         "recommendation": "BUY/SELL/HOLD",  // REQUIRED: Must be one of these exact values
                         "reasoning": ["reason1", "reason2", ...],  // REQUIRED: Array of strings
                         "price_targets": {  // REQUIRED: Object with these exact fields
-                            "stop_loss": "150.25",  // REQUIRED: String with price
-                            "take_profit": "165.50"  // REQUIRED: String with price
+                            "stop_loss": "150.25",  // REQUIRED: String with price. For SELL orders, must be HIGHER than current price. For BUY orders, must be LOWER than current price.
+                            "take_profit": "165.50"  // REQUIRED: String with price. For SELL orders, must be LOWER than current price. For BUY orders, must be HIGHER than current price.
                         },
                         "position_size": 0.01,  // REQUIRED: Decimal between 0 and 1
                         "trade_type": "day/swing"  // REQUIRED: Must be "day" or "swing"
                     }
+                    
+                    IMPORTANT PRICE RULES:
+                    1. For SELL orders (when you want to sell high and buy back low):
+                       - Current price is your entry (selling) price
+                       - stop_loss must be HIGHER than current price (to buy back at a higher price if wrong)
+                       - take_profit must be LOWER than current price (to buy back at a lower price if right)
+                       - Example: If current price is $100, valid levels would be stop_loss=$110, take_profit=$90
+                    
+                    2. For BUY orders (when you want to buy low and sell high):
+                       - Current price is your entry (buying) price
+                       - stop_loss must be LOWER than current price (to sell at a lower price if wrong)
+                       - take_profit must be HIGHER than current price (to sell at a higher price if right)
+                       - Example: If current price is $100, valid levels would be stop_loss=$90, take_profit=$110
+                    
+                    Use the ATR-based levels or support/resistance levels provided in the prompt.
                     
                     DO NOT include any explanatory text before or after the JSON. Return ONLY the JSON object.
                     ALL fields are required and must match the exact format shown above.""",
@@ -126,7 +141,7 @@ def get_trading_analysis(prompt: str) -> Optional[Dict[str, Any]]:
 
         # Log the raw response
         raw_response = response.choices[0].message.content.strip()
-        logger.info("Raw LLM response:\n%s", raw_response)
+        logger.debug("Raw LLM response:\n%s", raw_response)
 
         # Parse the response
         try:
@@ -249,8 +264,8 @@ def save_analysis(analysis: Dict[str, Any], symbol: str) -> None:
         # Create directories if they don't exist
         os.makedirs(output_dir, exist_ok=True)
 
-        # Create filename with timestamp
-        timestamp = datetime.now().strftime("%H-%M-%S")
+        # Create filename with hourly timestamp (floor to hour)
+        timestamp = datetime.now().strftime("%Y%m%d_%H00")
         filename = f"{symbol}_{timestamp}.json"
         filepath = os.path.join(output_dir, filename)
 
@@ -258,9 +273,9 @@ def save_analysis(analysis: Dict[str, Any], symbol: str) -> None:
         with open(filepath, "w") as f:
             json.dump(analysis, f, indent=2)
 
-        logger.info(f". Analysis saved to {filepath}")
+        logger.info(f" . Analysis saved to {filepath}")
     except Exception as e:
-        logger.error(f". Error saving analysis: {str(e)}")
+        logger.error(f" . Error saving analysis: {str(e)}")
 
 
 def get_existing_analysis(symbol: str, output_dir: str = "analysis") -> Optional[Dict[str, Any]]:
@@ -283,17 +298,23 @@ def get_existing_analysis(symbol: str, output_dir: str = "analysis") -> Optional
         else:
             output_dir = os.path.join(output_dir, "live_trading")
 
+        # Create date-based subfolder (YYYY-MM-DD format)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        output_dir = os.path.join(output_dir, date_str)
+
         # Create filename with hourly timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H00")
-        filename = f"{output_dir}/{symbol}_{timestamp}.json"
+        filename = f"{symbol}_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
 
         # Check if file exists
-        if os.path.exists(filename):
-            with open(filename, "r") as f:
+        if os.path.exists(filepath):
+            with open(filepath, "r") as f:
                 analysis = json.load(f)
-            logger.info(f" . Found existing analysis for {symbol} from {timestamp}")
+            logger.info(f"Found existing analysis for {symbol} from {timestamp}")
             return analysis
 
+        logger.debug(f"No existing analysis found for {symbol} at {filepath}")
         return None
 
     except Exception as e:

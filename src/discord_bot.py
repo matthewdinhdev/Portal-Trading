@@ -15,13 +15,14 @@ load_dotenv()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 
-def format_discord_message(analysis, symbol):
+def format_discord_message(analysis, symbol, current_price):
     """
     Format the trading analysis into a Discord message with rich formatting.
 
     Args:
         analysis (dict): The trading analysis from ChatGPT
         symbol (str): The trading symbol
+        current_price (float): The current price of the symbol
 
     Returns:
         dict: Discord message payload
@@ -40,7 +41,7 @@ def format_discord_message(analysis, symbol):
             {"name": "⏱️ Trade Type", "value": f"```{analysis['trade_type'].title()}```", "inline": True},
             {
                 "name": "🎯 Price Targets",
-                "value": f"Stop Loss: ${analysis['price_targets']['stop_loss']}\nTake Profit: ${analysis['price_targets']['take_profit']}",
+                "value": f"Current Price: ${current_price:.2f}\nStop Loss: ${analysis['price_targets']['stop_loss']}\nTake Profit: ${analysis['price_targets']['take_profit']}",
                 "inline": True,
             },
             {
@@ -55,13 +56,14 @@ def format_discord_message(analysis, symbol):
     return {"embeds": [embed]}
 
 
-def send_to_discord(analysis, symbol):
+def send_to_discord(analysis, symbol, current_price):
     """
     Send the trading analysis to Discord via webhook.
 
     Args:
         analysis (dict): The trading analysis from ChatGPT
         symbol (str): The trading symbol
+        current_price (float): The current price of the symbol
 
     Returns:
         bool: True if successful, False otherwise
@@ -72,7 +74,7 @@ def send_to_discord(analysis, symbol):
 
     try:
         # Format the message
-        message = format_discord_message(analysis, symbol)
+        message = format_discord_message(analysis, symbol, current_price)
 
         # Send to Discord
         response = requests.post(DISCORD_WEBHOOK_URL, json=message)
@@ -171,4 +173,4 @@ if __name__ == "__main__":
         "timestamp": datetime.now().isoformat(),
     }
 
-    send_to_discord(test_analysis, "AAPL")
+    send_to_discord(test_analysis, "AAPL", 150.00)

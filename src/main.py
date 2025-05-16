@@ -1,6 +1,5 @@
 import os
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import time
 from alpaca.trading.client import TradingClient
@@ -8,11 +7,8 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.requests import (
-    MarketOrderRequest,
     GetOrdersRequest,
     OrderRequest,
-    TakeProfitRequest,
-    StopLossRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce
 from dotenv import load_dotenv
@@ -20,7 +16,7 @@ import strategies
 import llm
 import discord_bot
 from logger import setup_logger
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Dict, List, Optional, Any
 
 # Set up logger
 logger = setup_logger("paper_trading.log")
@@ -42,13 +38,13 @@ TRADING_STRATEGY: Dict[str, Any] = {
         # "MSFT",  # Microsoft
         # "GOOGL",  # Alphabet
         # "AMZN",  # Amazon
-        # "NVDA",  # NVIDIA
+        "NVDA",  # NVIDIA
         # "META",  # Meta Platforms
-        # "TSLA",  # Tesla
+        "TSLA",  # Tesla
         # "AMD",  # Advanced Micro Devices
         # "LLY",  # Eli Lilly
         # "JNJ",  # Johnson & Johnson
-        # "UNH",  # UnitedHealth
+        "UNH",  # UnitedHealth
         # "JPM",  # JPMorgan Chase
         # "V",  # Visa
         # "MA",  # Mastercard
@@ -161,13 +157,19 @@ def execute_trade(
 
         # Get current price to validate stop loss and take profit levels
         try:
+            # Get the most recent price using 1-minute bars
             end_date = datetime.now()
             start_date = end_date - timedelta(minutes=1)
             request_params = StockBarsRequest(
-                symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start_date, end=end_date
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Minute,
+                start=start_date,
+                end=end_date,
+                limit=1,  # Only get the most recent bar
             )
             bars = data_client.get_stock_bars(request_params)
             current_price = float(bars.df["close"].iloc[-1])
+            logger.info(f"  . Current price from latest bar: ${current_price:.4f}")
         except Exception as e:
             logger.error(f". Error getting current price: {str(e)}")
             return None
@@ -190,36 +192,23 @@ def execute_trade(
 
         # If we have stop loss or take profit, create a bracket order
         if stop_loss or take_profit:
-            # For BUY orders:
-            # - Stop loss should be below current price
-            # - Take profit should be above current price
-            # For SELL orders:
-            # - Stop loss should be above current price
-            # - Take profit should be below current price
-
-            if side.lower() == "buy":
-                # For buy orders, ensure stop loss is below current price
-                if stop_loss is not None and stop_loss >= current_price:
-                    stop_loss = round(current_price * 0.99, 2)  # Set stop loss 1% below current price
-
-                # For buy orders, ensure take profit is above current price
-                if take_profit is not None and take_profit <= current_price:
-                    take_profit = round(current_price * 1.01, 2)  # Set take profit 1% above current price
-            else:  # sell order
-                # For sell orders, ensure stop loss is above current price
-                if stop_loss is not None and stop_loss <= current_price:
-                    stop_loss = round(current_price * 1.01, 2)  # Set stop loss 1% above current price
-
-                # For sell orders, ensure take profit is below current price
-                if take_profit is not None and take_profit >= current_price:
-                    take_profit = round(current_price * 0.99, 2)  # Set take profit 1% below current price
-
             # Set stop loss if provided
             if stop_loss is not None:
                 # For stop loss orders, we need to set both stop_price and limit_price
                 # The stop_price is the trigger price, and limit_price is the execution price
-                stop_loss_price = round(stop_loss, 2)
-                stop_loss_limit = round(stop_loss * 0.99 if side.lower() == "buy" else stop_loss * 1.01, 2)
+                if side.lower() == "sell":
+                    # For SELL orders:
+                    # - stop_price must be higher than current price
+                    # - limit_price must be higher than stop_price
+                    stop_loss_price = round(stop_loss, 2)
+                    stop_loss_limit = round(stop_loss + 0.01, 2)
+                else:
+                    # For BUY orders:
+                    # - stop_price must be lower than current price
+                    # - limit_price must be lower than stop_price
+                    stop_loss_price = round(stop_loss, 2)
+                    stop_loss_limit = round(stop_loss - 0.01, 2)
+
                 order_request.stop_loss = {
                     "stop_price": stop_loss_price,
                     "limit_price": stop_loss_limit,
@@ -235,18 +224,6 @@ def execute_trade(
         # Submit the order
         logger.info(". Submitting order")
         order = trading_client.submit_order(order_request)
-
-        # Log the order response
-        logger.info(". Order Response Details:")
-        logger.info(f"  . Order ID: {order.id}")
-        logger.info(f"  . Status: {order.status}")
-        logger.info(f"  . Created At: {order.created_at}")
-        logger.info(f"  . Updated At: {order.updated_at}")
-        logger.info(f"  . Filled At: {order.filled_at}")
-        logger.info(f"  . Filled Avg Price: {order.filled_avg_price}")
-        logger.info(f"  . Extended Hours: {order.extended_hours}")
-        logger.info(f"  . Limit Price: {order.limit_price}")
-        logger.info(f"  . Stop Price: {order.stop_price}")
 
         # Log bracket order details at debug level
         if order.order_class == "bracket" and hasattr(order, "legs") and order.legs:
@@ -268,6 +245,15 @@ def execute_trade(
         # Wait for the order to fill
         logger.info(". Waiting for order to fill")
         order = trading_client.get_order_by_id(order.id)
+
+        # Log the order response
+        logger.info(". Order Response Details:")
+        logger.info(f"  . Order ID: {order.id}")
+        logger.info(f"  . Status: {order.status}")
+        logger.info(f"  . Created At: {order.created_at}")
+        logger.info(f"  . Updated At: {order.updated_at}")
+        logger.info(f"  . Filled At: {order.filled_at}")
+        logger.info(f"  . Filled Avg Price: {order.filled_avg_price}")
 
         # Create response dictionary
         trade_details = {
@@ -330,6 +316,17 @@ def analyze_symbol(symbol: str) -> None:
 
         positions = get_current_positions()
 
+        # Check for existing position in this symbol
+        existing_position = next((pos for pos in positions if pos["symbol"] == symbol), None)
+        if existing_position:
+            logger.info(f". Found existing position in {symbol}:")
+            logger.info(f"  . Quantity: {existing_position['qty']}")
+            logger.info(f"  . Entry Price: ${existing_position['avg_entry_price']:.2f}")
+            logger.info(f"  . Current Price: ${existing_position['current_price']:.2f}")
+            logger.info(
+                f"  . Unrealized P/L: ${existing_position['unrealized_pl']:.2f} ({existing_position['unrealized_plpc']*100:+.2f}%)"
+            )
+
         # Check for existing analysis from this hour
         existing_analysis = llm.get_existing_analysis(symbol)
         if existing_analysis:
@@ -364,6 +361,15 @@ def analyze_symbol(symbol: str) -> None:
 
         # Execute trade if recommended
         if analysis["recommendation"] in ["BUY", "SELL"]:
+            # Skip if we have a position and the recommendation doesn't match our position
+            if existing_position:
+                if existing_position["qty"] > 0 and analysis["recommendation"] == "BUY":
+                    logger.info(". Skipping BUY recommendation as we already have a long position")
+                    return
+                elif existing_position["qty"] < 0 and analysis["recommendation"] == "SELL":
+                    logger.info(". Skipping SELL recommendation as we already have a short position")
+                    return
+
             # Calculate position size
             position_value = account_info["equity"] * analysis["position_size"]
             trade_type = analysis["trade_type"]
@@ -408,7 +414,7 @@ def analyze_symbol(symbol: str) -> None:
 
         # Send to Discord
         logger.info("Sending analysis to Discord")
-        if discord_bot.send_to_discord(analysis, symbol):
+        if discord_bot.send_to_discord(analysis, symbol, current_price):
             logger.info(" . Successfully sent to Discord")
         else:
             logger.error(". Failed to send to Discord")
@@ -435,26 +441,70 @@ def is_market_open(current_time: datetime) -> bool:
     return is_open
 
 
+def display_position_updates() -> None:
+    """Display current position updates including P/L and current prices"""
+    positions = get_current_positions()
+    if not positions:
+        logger.info("No active positions")
+        return
+
+    logger.info("Current Position Updates:")
+    logger.info("=" * 50)
+    for pos in positions:
+        pnl_color = "+" if pos["unrealized_pl"] >= 0 else ""
+        logger.info(f"Symbol: {pos['symbol']}")
+        logger.info(f"  Quantity: {pos['qty']}")
+        logger.info(f"  Entry Price: ${pos['avg_entry_price']:.2f}")
+        logger.info(f"  Current Price: ${pos['current_price']:.2f}")
+        logger.info(
+            f"  Unrealized P/L: ${pnl_color}{pos['unrealized_pl']:.2f} ({pnl_color}{pos['unrealized_plpc']*100:.2f}%)"
+        )
+        logger.info(f"  Market Value: ${pos['market_value']:.2f}")
+        logger.info("-" * 50)
+
+
 def main() -> None:
-    """Main trading loop"""
-    logger.info("Starting trading bot")
-    logger.info(f". Environment: {'PAPER' if PAPER_TRADING else 'LIVE'}")
+    """Main function to run the trading bot"""
+    logger.info("Starting trading bot...")
 
-    try:
-        current_time = datetime.now()
+    while True:
+        try:
+            current_time = datetime.now()
+            logger.info(f"Checking market conditions at {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Check if market is open
-        if not is_market_open(current_time):
-            logger.info(". Market is closed, exiting")
-            return
+            # Calculate next run time (5 minutes after the next hour)
+            next_run = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1, minutes=5)
+            wait_seconds = (next_run - current_time).total_seconds()
 
-        # Analyze each symbol
-        for symbol in TRADING_STRATEGY["symbols"]:
-            analyze_symbol(symbol)
+            # Check if market is open
+            if not is_market_open(current_time):
+                logger.info("Market is closed. Waiting until next run time...")
+                time.sleep(wait_seconds)
+                continue
 
-    except Exception as e:
-        logger.error(f". Error in main loop: {str(e)}")
-        raise  # Re-raise the exception to exit the program
+            # Analyze each symbol
+            for symbol in TRADING_STRATEGY["symbols"]:
+                analyze_symbol(symbol)
+
+            # Display initial position update
+            display_position_updates()
+
+            # During the wait time, show position updates every 20 minutes
+            wait_start = datetime.now()
+            while (datetime.now() - wait_start).total_seconds() < wait_seconds:
+                remaining = wait_seconds - (datetime.now() - wait_start).total_seconds()
+                logger.info(f"Waiting {remaining:.0f} seconds until next run time...")
+                time.sleep(1200)  # Sleep for 20 minutes
+                if is_market_open(datetime.now()):  # Only show updates during market hours
+                    display_position_updates()
+
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt. Exiting...")
+            break
+        except Exception as e:
+            logger.error(f"Error in main loop: {str(e)}")
+            logger.info("Waiting 60 seconds before retrying...")
+            time.sleep(60)
 
 
 if __name__ == "__main__":
