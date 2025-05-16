@@ -347,10 +347,10 @@ def get_existing_analysis(symbol: str, output_dir: str = "analysis") -> Optional
         if os.path.exists(filepath):
             with open(filepath, "r") as f:
                 analysis = json.load(f)
-            logger.info(f"Found existing analysis for {symbol} from {timestamp}")
+            logger.info(f" . Found existing analysis for {symbol} from {timestamp}")
             return analysis
 
-        logger.debug(f"No existing analysis found for {symbol} at {filepath}")
+        logger.debug(f" . No existing analysis found for {symbol} at {filepath}")
         return None
 
     except Exception as e:

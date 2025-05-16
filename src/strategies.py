@@ -9,7 +9,16 @@ logger = logging.getLogger(__name__)
 
 
 def calculate_price_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate basic price-based indicators"""
+    """Calculate basic price-based indicators.
+
+    Computes returns and log returns for the price data.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+
+    Returns:
+        pd.DataFrame: DataFrame with added 'returns' and 'log_returns' columns.
+    """
     df = df.copy()
     df["returns"] = df["close"].pct_change()
     df["log_returns"] = np.log(df["close"] / df["close"].shift(1))
@@ -17,7 +26,18 @@ def calculate_price_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate various moving averages"""
+    """Calculate various moving averages.
+
+    Computes Simple Moving Average (SMA) and Exponential Moving Average (EMA)
+    for multiple time windows.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+
+    Returns:
+        pd.DataFrame: DataFrame with added SMA and EMA columns for windows
+            5, 10, 20, 50, and 200.
+    """
     df = df.copy()
     for window in [5, 10, 20, 50, 200]:
         df[f"SMA_{window}"] = df["close"].rolling(window=window).mean()
@@ -26,7 +46,19 @@ def calculate_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_bollinger_bands(df: pd.DataFrame, window: int = 20, num_std: float = 2) -> pd.DataFrame:
-    """Calculate Bollinger Bands"""
+    """Calculate Bollinger Bands.
+
+    Computes middle band (SMA), standard deviation, and upper/lower bands
+    based on the specified window and standard deviation multiplier.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+        window: Number of periods for the moving average (default: 20).
+        num_std: Number of standard deviations for the bands (default: 2).
+
+    Returns:
+        pd.DataFrame: DataFrame with added Bollinger Bands columns.
+    """
     df = df.copy()
     df["BB_middle"] = df["close"].rolling(window=window).mean()
     df["BB_std"] = df["close"].rolling(window=window).std()
@@ -36,7 +68,17 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = 20, num_std: float
 
 
 def calculate_rsi(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-    """Calculate Relative Strength Index"""
+    """Calculate Relative Strength Index (RSI).
+
+    Computes RSI using the specified window period for smoothing.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+        window: Number of periods for RSI calculation (default: 14).
+
+    Returns:
+        pd.DataFrame: DataFrame with added 'RSI' column.
+    """
     df = df.copy()
     delta = df["close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -47,7 +89,20 @@ def calculate_rsi(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
 
 
 def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
-    """Calculate MACD and related indicators"""
+    """Calculate MACD and related indicators.
+
+    Computes MACD line, signal line, and histogram using specified periods
+    for fast EMA, slow EMA, and signal line smoothing.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+        fast: Period for fast EMA (default: 12).
+        slow: Period for slow EMA (default: 26).
+        signal: Period for signal line smoothing (default: 9).
+
+    Returns:
+        pd.DataFrame: DataFrame with added MACD, MACD_signal, and MACD_hist columns.
+    """
     df = df.copy()
     exp1 = df["close"].ewm(span=fast, adjust=False).mean()
     exp2 = df["close"].ewm(span=slow, adjust=False).mean()
@@ -58,7 +113,18 @@ def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int
 
 
 def calculate_stochastic(df: pd.DataFrame, k_window: int = 14, d_window: int = 3) -> pd.DataFrame:
-    """Calculate Stochastic Oscillator"""
+    """Calculate Stochastic Oscillator.
+
+    Computes %K and %D lines using specified windows for smoothing.
+
+    Args:
+        df: DataFrame containing price data with 'high', 'low', and 'close' columns.
+        k_window: Period for %K calculation (default: 14).
+        d_window: Period for %D smoothing (default: 3).
+
+    Returns:
+        pd.DataFrame: DataFrame with added '%K' and '%D' columns.
+    """
     df = df.copy()
     low_14 = df["low"].rolling(window=k_window).min()
     high_14 = df["high"].rolling(window=k_window).max()
@@ -68,7 +134,17 @@ def calculate_stochastic(df: pd.DataFrame, k_window: int = 14, d_window: int = 3
 
 
 def calculate_atr(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-    """Calculate Average True Range"""
+    """Calculate Average True Range (ATR).
+
+    Computes ATR using the specified window period for smoothing.
+
+    Args:
+        df: DataFrame containing price data with 'high', 'low', and 'close' columns.
+        window: Number of periods for ATR calculation (default: 14).
+
+    Returns:
+        pd.DataFrame: DataFrame with added 'ATR' column.
+    """
     df = df.copy()
     high_low = df["high"] - df["low"]
     high_close = np.abs(df["high"] - df["close"].shift())
@@ -80,7 +156,17 @@ def calculate_atr(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
 
 
 def calculate_volume_indicators(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    """Calculate volume-based indicators"""
+    """Calculate volume-based indicators.
+
+    Computes volume moving average and volume ratio.
+
+    Args:
+        df: DataFrame containing volume data with 'volume' column.
+        window: Period for volume moving average (default: 20).
+
+    Returns:
+        pd.DataFrame: DataFrame with added volume indicator columns.
+    """
     df = df.copy()
     df["volume_ma_20"] = df["volume"].rolling(window=window).mean()
     df["volume_ratio"] = df["volume"] / df["volume_ma_20"]
@@ -88,7 +174,16 @@ def calculate_volume_indicators(df: pd.DataFrame, window: int = 20) -> pd.DataFr
 
 
 def calculate_momentum_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate momentum indicators"""
+    """Calculate momentum indicators.
+
+    Computes momentum and rate of change over a 10-period window.
+
+    Args:
+        df: DataFrame containing price data with 'close' column.
+
+    Returns:
+        pd.DataFrame: DataFrame with added momentum indicator columns.
+    """
     df = df.copy()
     df["momentum"] = df["close"] - df["close"].shift(10)
     df["rate_of_change"] = df["close"].pct_change(periods=10) * 100
@@ -96,14 +191,34 @@ def calculate_momentum_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_volatility_indicators(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    """Calculate volatility indicators"""
+    """Calculate volatility indicators.
+
+    Computes annualized volatility using the specified window period.
+
+    Args:
+        df: DataFrame containing returns data with 'returns' column.
+        window: Period for volatility calculation (default: 20).
+
+    Returns:
+        pd.DataFrame: DataFrame with added 'volatility' column.
+    """
     df = df.copy()
     df["volatility"] = df["returns"].rolling(window=window).std() * np.sqrt(252)
     return df
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate all technical indicators"""
+    """Calculate all technical indicators.
+
+    Applies all technical indicator calculations to the input DataFrame
+    and cleans up any NaN values.
+
+    Args:
+        df: DataFrame containing price and volume data.
+
+    Returns:
+        pd.DataFrame: DataFrame with all technical indicators added.
+    """
     df = df.copy()
 
     # Apply all indicator calculations
@@ -125,7 +240,19 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def rsi_strategy(df: pd.DataFrame, initial_capital: float = 100000) -> pd.DataFrame:
-    """Simple RSI-based strategy"""
+    """Simple RSI-based trading strategy.
+
+    Generates trading signals based on RSI overbought/oversold conditions
+    and calculates strategy returns and portfolio value.
+
+    Args:
+        df: DataFrame containing price data and RSI indicator.
+        initial_capital: Starting capital for the strategy (default: 100000).
+
+    Returns:
+        pd.DataFrame: DataFrame with added strategy signals, positions,
+            returns, and portfolio value columns.
+    """
     df = df.copy()
 
     # Generate signals based on RSI
@@ -148,10 +275,22 @@ def rsi_strategy(df: pd.DataFrame, initial_capital: float = 100000) -> pd.DataFr
 def format_for_llm(
     df: pd.DataFrame, lookback_periods: int = 48, analysis_date: Optional[datetime] = None
 ) -> List[Dict[str, Any]]:
-    """
-    Format the data for LLM consumption.
-    Returns a list of dictionaries, where each dictionary represents a time period
-    with its indicators and market context.
+    """Format market data for LLM consumption.
+
+    Creates a structured representation of market data including price,
+    technical indicators, and market context for a specific time period.
+
+    Args:
+        df: DataFrame containing market data and technical indicators.
+        lookback_periods: Number of periods to look back (default: 48).
+        analysis_date: Optional specific date to analyze (default: None).
+
+    Returns:
+        List[Dict[str, Any]]: List of dictionaries containing formatted
+            market data and indicators.
+
+    Raises:
+        ValueError: If insufficient data is available for the analysis.
     """
     # If analysis_date is provided, filter data to that date
     if analysis_date is not None:
@@ -285,9 +424,20 @@ def get_llm_prompt(
     lookback_periods: int = 48,
     analysis_date: Optional[datetime] = None,
 ) -> Optional[str]:
-    """
-    Generate a prompt for the LLM based on the current market conditions.
-    Uses 48 periods of historical data by default.
+    """Generate a prompt for the LLM based on market data and account information.
+
+    Creates a comprehensive prompt including market data, technical indicators,
+    account information, and current positions for the LLM to analyze.
+
+    Args:
+        df: DataFrame containing market data and technical indicators.
+        account_info: Optional dictionary containing account information.
+        positions: Optional list of current positions.
+        lookback_periods: Number of periods to look back (default: 48).
+        analysis_date: Optional specific date to analyze (default: None).
+
+    Returns:
+        Optional[str]: Formatted prompt string for the LLM, or None if there's an error.
     """
     try:
         if df.empty:
@@ -440,8 +590,19 @@ def get_llm_prompt(
 
 
 def automated_strategy(df: pd.DataFrame, llm_analysis: Dict[str, Any], initial_capital: float = 100000) -> pd.DataFrame:
-    """
-    Automated trading strategy using LLM analysis for stop losses and take profits.
+    """Execute automated trading strategy based on LLM analysis.
+
+    Implements trading decisions based on LLM analysis, including position
+    sizing, entry/exit points, and portfolio tracking.
+
+    Args:
+        df: DataFrame containing market data and technical indicators.
+        llm_analysis: Dictionary containing LLM's trading analysis and recommendations.
+        initial_capital: Starting capital for the strategy (default: 100000).
+
+    Returns:
+        pd.DataFrame: DataFrame with added strategy signals, positions,
+            returns, and portfolio value columns.
     """
     df = df.copy()
 
