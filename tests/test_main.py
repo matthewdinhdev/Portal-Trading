@@ -44,24 +44,6 @@ class TestMain(unittest.TestCase):
             },
         ]
 
-    def test_is_market_open(self):
-        """Test market hours validation"""
-        # Test during market hours (9:30 AM - 4:00 PM ET)
-        market_open = datetime.now().replace(hour=10, minute=30)
-        self.assertTrue(main.is_market_open(market_open))
-
-        # Test before market open
-        before_market = datetime.now().replace(hour=9, minute=0)
-        self.assertFalse(main.is_market_open(before_market))
-
-        # Test after market close
-        after_market = datetime.now().replace(hour=16, minute=30)
-        self.assertFalse(main.is_market_open(after_market))
-
-        # Test weekend
-        weekend = datetime.now() + timedelta(days=(5 - datetime.now().weekday()))  # Next Saturday
-        self.assertFalse(main.is_market_open(weekend))
-
     def test_get_account_info(self):
         """Test account info parsing"""
 

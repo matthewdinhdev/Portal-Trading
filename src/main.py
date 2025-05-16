@@ -10,6 +10,8 @@ from alpaca.trading.requests import (
     GetOrdersRequest,
     OrderRequest,
     GetCalendarRequest,
+    StopLossRequest,
+    TakeProfitRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce
 from dotenv import load_dotenv
@@ -268,22 +270,32 @@ def execute_trade(
     logger.info(f"   . Quantity: {qty}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
 
     try:
+        # Setup order request
         stop_loss = round(float(stop_loss), 2)
         take_profit = round(float(take_profit), 2)
+        time_in_force = TimeInForce.DAY if trade_type == "day" else TimeInForce.GTC
         order_request = OrderRequest(
             symbol=symbol,
             qty=qty,
             side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
             type="market",
-            time_in_force=TimeInForce.DAY if trade_type == "day" else TimeInForce.GTC,
+            time_in_force=time_in_force,
             order_class="bracket",
-            stop_loss={"stop_price": stop_loss, "limit_price": stop_loss},
-            take_profit={"limit_price": take_profit},
+            stop_loss=StopLossRequest(
+                stop_price=stop_loss,
+                time_in_force=time_in_force,
+            ),
+            take_profit=TakeProfitRequest(
+                limit_price=take_profit,
+                time_in_force=time_in_force,
+            ),
         )
 
+        # Submit order
         order = trading_client.submit_order(order_request)
         order = trading_client.get_order_by_id(order.id)
 
+        # Return order details
         return {
             "symbol": symbol,
             "side": side,
@@ -354,11 +366,25 @@ def execute_trading_decision(symbol: str, analysis: Dict[str, Any], account_info
         logger.error(f"Error getting current price: {str(e)}")
         return
 
+    # Calculate quantity based on position size percentage
+    position_size = analysis["position_size"]
+    if isinstance(position_size, str):
+        position_size_pct = float(position_size.strip("%")) / 100
+    else:
+        position_size_pct = float(position_size) / 100
+    account_value = float(account_info["equity"])
+    position_value = account_value * position_size_pct
+    qty = int(position_value / current_price)  # Round down to whole shares
+
+    # If quantity is 0, set to 1 share
+    if qty == 0:
+        qty = 1
+
     # Execute the trade
     trade_result = execute_trade(
         symbol=symbol,
         side=analysis["recommendation"],
-        qty=1,  # Fixed quantity for now
+        qty=qty,
         trade_type=analysis["trade_type"],
         stop_loss=stop_loss,
         take_profit=take_profit,
@@ -407,7 +433,6 @@ def analyze_symbol(symbol: str) -> Optional[Dict[str, Any]]:
                 "account_info": account_info,
             }
         return None
-
     except Exception as e:
         logger.error(f"Error analyzing symbol {symbol}: {str(e)}")
         return None
