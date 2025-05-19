@@ -51,6 +51,8 @@ logs/
 *.csv
 *.dat
 analysis/
+.cursor
+backtest_results/
 
 # Misc
 *.pid

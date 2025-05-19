@@ -20,7 +20,6 @@ import llm
 import discord_bot
 from logger import setup_logger
 from typing import Dict, List, Optional, Any
-import pytz
 import argparse
 
 # Set up logger

@@ -219,6 +219,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: DataFrame with all technical indicators added.
     """
+    logger.info(" . Calculating technical indicators")
     df = df.copy()
 
     # Apply all indicator calculations
@@ -292,18 +293,21 @@ def format_for_llm(
     Raises:
         ValueError: If insufficient data is available for the analysis.
     """
-    # If analysis_date is provided, filter data to that date
+    # If analysis_date is provided, find the index for that date
     if analysis_date is not None:
         if isinstance(analysis_date, datetime):
             analysis_date = analysis_date.date()
-        df = df[df.index.date == analysis_date]
+
+        # Get all data up to and including the analysis date
+        df = df[df.index.date <= analysis_date]
+
         if df.empty:
             raise ValueError(f"No data available for analysis date: {analysis_date}")
 
-    # Adjust lookback periods if we don't have enough data
-    lookback_periods = min(lookback_periods, len(df) - 1)
-    if lookback_periods < 5:
-        raise ValueError(f"Insufficient data points. Need at least 5 periods, got {len(df)}")
+    # Ensure we have enough data points
+    if len(df) < 5:
+        logger.warning(f"Insufficient data points. Need at least 5 periods, got {len(df)}")
+        return []
 
     # Create a list to store our formatted data
     llm_data: List[Dict[str, Any]] = []
@@ -311,6 +315,7 @@ def format_for_llm(
     # Get the last data point for analysis
     try:
         i = len(df) - 1  # Use the last data point
+
         current_price = df["close"].iloc[i]
         price_change_1h = float(df["returns"].iloc[i])
 
@@ -408,11 +413,14 @@ def format_for_llm(
         llm_data.append(current_data)
 
     except Exception as e:
-        print(f"Error processing data point: {str(e)}")
+        logger.error(f"Error processing data point: {str(e)}")
+        logger.error(f"DataFrame info:\n{df.info()}")
+        logger.error(f"DataFrame head:\n{df.head()}")
         raise ValueError(f"Failed to process data: {str(e)}")
 
     if not llm_data:
-        raise ValueError("No valid data points could be processed")
+        logger.warning("No valid data points could be processed")
+        return []
 
     return llm_data
 
@@ -440,17 +448,18 @@ def get_llm_prompt(
         Optional[str]: Formatted prompt string for the LLM, or None if there's an error.
     """
     try:
+        logger.info(" . Generating LLM prompt")
+
         if df.empty:
+            logger.error("Empty DataFrame provided")
             raise ValueError("No data available for analysis")
 
-        # Ensure we have enough data points
-        if len(df) < 5:
-            raise ValueError(f"Insufficient data points. Need at least 5 periods, got {len(df)}")
-
-        # Get formatted data
+        # Get formatted data first
         llm_data = format_for_llm(df, lookback_periods, analysis_date)
+
         if not llm_data:
-            raise ValueError("No valid data points could be processed")
+            logger.warning("No valid data points could be processed")
+            return None
 
         # Get the most recent data point
         current = llm_data[-1]
@@ -460,7 +469,8 @@ def get_llm_prompt(
         recent_highs = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
 
         if not recent_lows or not recent_highs:
-            raise ValueError("Insufficient data for support/resistance calculation")
+            logger.warning("Insufficient data for support/resistance calculation")
+            return None
 
         support_level = min(recent_lows)
         resistance_level = max(recent_highs)
@@ -576,16 +586,17 @@ def get_llm_prompt(
                 "For price targets, use the following format:",
                 "- stop_loss: Use either the ATR-based stop loss or the nearest support level",
                 "- take_profit: Use either the ATR-based take profit or the nearest resistance level",
-                "Example: stop_loss: '150.25', take_profit: '165.50'",
+                "Example: stop_loss: 150.25, take_profit: 165.50",
             ]
         )
 
         final_prompt = "\n".join(prompt)
-        logger.debug("Generated LLM prompt:\n%s", final_prompt)
         return final_prompt
 
     except Exception as e:
         logger.error(f"Error generating LLM prompt: {str(e)}")
+        logger.error(f"DataFrame info:\n{df.info()}")
+        logger.error(f"DataFrame head:\n{df.head()}")
         return None
 
 

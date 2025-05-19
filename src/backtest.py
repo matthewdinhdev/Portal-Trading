@@ -1,16 +1,20 @@
+import backtrader as bt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+import os
+import json
+import logging
+from typing import Dict, List, Optional, Any
+import time
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
-import strategies
-import llm
-import os
-import json
+
 from logger import setup_logger
-from typing import Dict, List, Optional, Any, Union, Tuple
+from strategies import calculate_indicators
+import llm
 
 # Set up logger
 logger = setup_logger("backtest.log")
@@ -27,34 +31,309 @@ if not API_KEY or not SECRET_KEY:
 
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-# Define trading strategy parameters
-TRADING_STRATEGY: Dict[str, Any] = {
-    "symbols": ["SPY"],  # S&P 500 ETF
-    "timeframe": TimeFrame.Hour,
-    "lookback_periods": 120,  # 5 days of hourly data
-}
+# Define test period (one week in 2016)
+TEST_START_DATE = datetime(2016, 1, 4, tzinfo=timezone.utc)  # First trading day of 2016
+TEST_END_DATE = datetime(2016, 2, 4, tzinfo=timezone.utc)
+
+
+class MarketConditionCache:
+    """Cache for market conditions to avoid redundant LLM calls."""
+
+    def __init__(self, max_size=1000, max_age_hours=4):
+        self.cache = {}
+        self.max_size = max_size
+        self.max_age = timedelta(hours=max_age_hours)
+        self.hits = 0
+        self.misses = 0
+
+    def get_market_condition_hash(self, data):
+        """Create a hash of current market conditions."""
+        # Get the most recent data point
+        current = data.iloc[-1]
+
+        # Create a normalized market condition hash
+        return {
+            "trend": round(current["trend_strength"], 2) if "trend_strength" in current else 0,
+            "volatility": round(current["atr"] / current["close"], 3) if "atr" in current else 0,
+            "volume_ratio": round(current["volume"] / current["volume_ma"], 2) if "volume_ma" in current else 1,
+            "rsi_zone": round(current["rsi"] / 10) * 10 if "rsi" in current else 50,
+            "macd_signal": round(current["macd"] / current["close"], 4) if "macd" in current else 0,
+        }
+
+    def get_cache_key(self, market_hash):
+        """Convert market hash to a cache key."""
+        return json.dumps(market_hash, sort_keys=True)
+
+    def is_similar_condition(self, hash1, hash2, tolerances=None):
+        """Check if two market conditions are similar within tolerances."""
+        if tolerances is None:
+            tolerances = {"trend": 0.1, "volatility": 0.01, "volume_ratio": 0.2, "rsi_zone": 10, "macd_signal": 0.001}
+
+        logger.info("Comparing market conditions:")
+        logger.info(f"Current: {hash1}")
+        logger.info(f"Cached:  {hash2}")
+        logger.info("Differences:")
+
+        for key in hash1:
+            diff = abs(hash1[key] - hash2[key])
+            is_similar = diff <= tolerances[key]
+            logger.info(f"  {key}: {diff:.4f} (tolerance: {tolerances[key]}, similar: {is_similar})")
+            if not is_similar:
+                return False
+        return True
+
+    def get(self, data, current_time):
+        """Get cached analysis for current market conditions."""
+        current_hash = self.get_market_condition_hash(data)
+        current_key = self.get_cache_key(current_hash)
+
+        # Check for exact match first
+        if current_key in self.cache:
+            cache_entry = self.cache[current_key]
+            if current_time - cache_entry["timestamp"] <= self.max_age:
+                logger.info(f"Found exact match in cache from {cache_entry['timestamp']}")
+                self.hits += 1
+                return cache_entry["analysis"]
+
+        # Check for similar conditions
+        for key, entry in self.cache.items():
+            if current_time - entry["timestamp"] <= self.max_age:
+                cached_hash = json.loads(key)
+                logger.info(f"\nChecking cache entry from {entry['timestamp']}")
+                if self.is_similar_condition(current_hash, cached_hash):
+                    self.hits += 1
+                    return entry["analysis"]
+
+        self.misses += 1
+        return None
+
+    def put(self, data, analysis, current_time):
+        """Store analysis in cache."""
+        current_hash = self.get_market_condition_hash(data)
+        current_key = self.get_cache_key(current_hash)
+
+        # Remove oldest entry if cache is full
+        if len(self.cache) >= self.max_size:
+            oldest_key = min(self.cache.keys(), key=lambda k: self.cache[k]["timestamp"])
+            del self.cache[oldest_key]
+
+        self.cache[current_key] = {"analysis": analysis, "timestamp": current_time, "hit_count": 0}
+
+    def get_stats(self):
+        """Get cache statistics."""
+        total = self.hits + self.misses
+        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        return {"hits": self.hits, "misses": self.misses, "hit_rate": hit_rate, "cache_size": len(self.cache)}
+
+
+class LLMStrategy(bt.Strategy):
+    """
+    Strategy that uses LLM for trading decisions
+    """
+
+    params = (("lookback_periods", 60),)
+
+    def __init__(self):
+        self.order = None
+        self.buyprice = None
+        self.buycomm = None
+        self.current_position = None
+        self.trades = []  # List to store all trades
+        self.cache = MarketConditionCache()  # Initialize market condition cache
+
+    def notify_order(self, order):
+        if order.status in [order.Submitted, order.Accepted]:
+            return
+
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(
+                    f"BUY EXECUTED, Price: {order.executed.price:.2f}, "
+                    f"Cost: {order.executed.value:.2f}, "
+                    f"Comm: {order.executed.comm:.2f}"
+                )
+                self.buyprice = order.executed.price
+                self.buycomm = order.executed.comm
+            else:
+                self.log(
+                    f"SELL EXECUTED, Price: {order.executed.price:.2f}, "
+                    f"Cost: {order.executed.value:.2f}, "
+                    f"Comm: {order.executed.comm:.2f}"
+                )
+
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log("Order Canceled/Margin/Rejected")
+
+        self.order = None
+
+    def notify_trade(self, trade):
+        if not trade.isclosed:
+            return
+
+        # Store trade information
+        trade_info = {
+            "entry_date": self.data.datetime.datetime(0).strftime("%Y-%m-%d %H:%M:%S"),
+            "exit_date": self.data.datetime.datetime(0).strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_price": trade.price,
+            "exit_price": (
+                trade.pnl / trade.size + trade.price if trade.size != 0 else trade.price
+            ),  # Calculate exit price
+            "size": trade.size,
+            "pnl": trade.pnl,
+            "pnlcomm": trade.pnlcomm,
+            "status": "WIN" if trade.pnl > 0 else "LOSS",
+        }
+        self.trades.append(trade_info)
+
+        self.log(f"OPERATION PROFIT, GROSS {trade.pnl:.2f}, NET {trade.pnlcomm:.2f}")
+
+    def log(self, txt, dt=None):
+        dt = dt or self.datas[0].datetime.date(0)
+        logger.info(f"{dt.isoformat()} {txt}")
+
+    def next(self):
+        """Main strategy logic"""
+        logger.info("Next")
+
+        # Check if we have enough data points
+        if len(self.data) < self.p.lookback_periods:
+            logger.info(f" . Waiting for more data... Current: {len(self.data)}, Required: {self.p.lookback_periods}")
+            return
+
+        # Get current data
+        current_data = self.get_current_data()
+
+        # Get LLM analysis
+        analysis = self.get_llm_analysis(current_data)
+
+        # Skip trading if analysis is None (cache hit)
+        if analysis is None:
+            return
+
+        # Process trade if recommendation is BUY or SELL
+        if analysis["recommendation"] in ["BUY", "SELL"]:
+            if self.order:
+                return
+
+            if not self.position:  # No position
+                if analysis["recommendation"] == "BUY":
+                    self.order = self.buy()
+                    self.current_position = {
+                        "type": "BUY",
+                        "stop_loss": analysis["price_targets"]["stop_loss"],
+                        "take_profit": analysis["price_targets"]["take_profit"],
+                        "trade_type": analysis["trade_type"],
+                    }
+                else:  # SELL
+                    self.order = self.sell()
+                    self.current_position = {
+                        "type": "SELL",
+                        "stop_loss": analysis["price_targets"]["stop_loss"],
+                        "take_profit": analysis["price_targets"]["take_profit"],
+                        "trade_type": analysis["trade_type"],
+                    }
+            else:  # Have position
+                # Check stop loss
+                if self.current_position["type"] == "BUY":
+                    if self.data.close[0] <= self.current_position["stop_loss"]:
+                        self.order = self.sell()
+                        self.current_position = None
+                else:  # SELL position
+                    if self.data.close[0] >= self.current_position["stop_loss"]:
+                        self.order = self.buy()
+                        self.current_position = None
+
+                # Check take profit
+                if self.current_position:
+                    if self.current_position["type"] == "BUY":
+                        if self.data.close[0] >= self.current_position["take_profit"]:
+                            self.order = self.sell()
+                            self.current_position = None
+                    else:  # SELL position
+                        if self.data.close[0] <= self.current_position["take_profit"]:
+                            self.order = self.buy()
+                            self.current_position = None
+
+    def get_current_data(self):
+        """Get current data for LLM analysis"""
+
+        logger.info(" . Generating data for LLM analysis")
+
+        # collect historical data
+        data = []
+        for i in range(-self.p.lookback_periods, 1):
+            dt = self.data.datetime.datetime(i)
+            data.append(
+                {
+                    "datetime": dt,
+                    "open": float(self.data.open[i]),
+                    "high": float(self.data.high[i]),
+                    "low": float(self.data.low[i]),
+                    "close": float(self.data.close[i]),
+                    "volume": float(self.data.volume[i]),
+                }
+            )
+
+        # create indicator dataframe
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df.set_index("datetime", inplace=True)
+            df.index = pd.to_datetime(df.index)
+
+            # Use the calculate_indicators function from strategies.py
+            df = calculate_indicators(df)
+
+            if df.empty:
+                raise ValueError("No data available for LLM analysis after calculating indicators")
+            elif len(df) < 5:
+                raise ValueError("Insufficient data points for LLM analysis")
+        return df
+
+    def get_llm_analysis(self, data):
+        """Get trading analysis from LLM"""
+        current_time = self.data.datetime.datetime(0)
+
+        # Try to get analysis from cache first
+        cached_analysis = self.cache.get(data, current_time)
+        if cached_analysis:
+            logger.info(f" . Using cached analysis for {current_time} (skipping trade execution)")
+            # Return None to skip trading for this period
+            return None
+
+        logger.info(f" . Getting LLM analysis for {current_time}")
+
+        analysis = None
+        num_retries = 0
+        RETRY_LIMIT = 3
+        while not analysis:
+            analysis = llm.get_llm_response(
+                df=data, lookback_periods=self.p.lookback_periods, analysis_date=current_time
+            )
+            if not analysis:
+                logger.info(" . No analysis available from LLM, retrying...")
+                time.sleep(3)
+                num_retries += 1
+                if num_retries > RETRY_LIMIT:
+                    raise ValueError(f" . Failed to get analysis from LLM after {RETRY_LIMIT} retries")
+
+        # Cache the new analysis with backtest timestamp
+        self.cache.put(data, analysis, current_time)
+
+        # Log cache statistics periodically
+        if len(self.trades) % 10 == 0:  # Log every 10 trades
+            stats = self.cache.get_stats()
+            logger.info(
+                f"Cache stats - Hits: {stats['hits']}, Misses: {stats['misses']}, Hit Rate: {stats['hit_rate']:.1f}%"
+            )
+
+        return analysis
 
 
 def get_historical_data(
     symbol: str, start_date: datetime, end_date: datetime, timeframe: TimeFrame = TimeFrame.Hour
 ) -> pd.DataFrame:
-    """Get historical data for a symbol from Alpaca.
-
-    Retrieves historical price data for the specified symbol and time range,
-    converting dates to UTC if necessary.
-
-    Args:
-        symbol: Trading symbol to get data for.
-        start_date: Start date for historical data.
-        end_date: End date for historical data.
-        timeframe: Timeframe for the data (default: TimeFrame.Hour).
-
-    Returns:
-        pd.DataFrame: DataFrame containing historical price data with datetime index.
-
-    Raises:
-        ValueError: If no historical data is available for the specified date range.
-    """
+    """Get historical data for a symbol from Alpaca."""
+    logger.info(" . Fetching historical data")
     # Convert to UTC if not already
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=timezone.utc)
@@ -79,350 +358,129 @@ def get_historical_data(
 
 
 def run_backtest(
-    symbol: str,
-    timeframe: str,
-    start_date: Union[str, datetime],
-    end_date: Union[str, datetime],
+    symbol: str = "SPY",
     initial_capital: float = 100000,
 ) -> Optional[Dict[str, Any]]:
-    """Run a backtest for a given symbol and date range using a single random day.
+    """Run a backtest using Backtrader."""
+    logger.info(
+        f"Running backtest for {symbol} from {TEST_START_DATE.strftime('%Y-%m-%d')} to {TEST_END_DATE.strftime('%Y-%m-%d')}"
+    )
 
-    Simulates trading based on LLM analysis for a randomly selected day within
-    the specified date range, tracking trades, equity, and performance metrics.
+    # Get historical data with additional lookback period
+    lookback_start = TEST_START_DATE - timedelta(days=5)
+    df = get_historical_data(symbol, lookback_start, TEST_END_DATE, TimeFrame.Hour)
 
-    Args:
-        symbol: Trading symbol to backtest.
-        timeframe: Timeframe for the backtest (e.g., "1m", "4h", "1d").
-        start_date: Start date for backtest (string or datetime).
-        end_date: End date for backtest (string or datetime).
-        initial_capital: Initial capital for backtest (default: 100000).
+    if df.empty:
+        raise ValueError("No historical data available for the specified date range")
 
-    Returns:
-        Optional[Dict[str, Any]]: Dictionary containing backtest results including
-            trades, equity curve, and performance metrics, or None if backtest fails.
+    # Create a cerebro entity
+    cerebro = bt.Cerebro()
 
-    Raises:
-        ValueError: If invalid timeframe, insufficient data, or other errors occur.
-    """
-    try:
-        # Convert string dates to datetime if needed
-        if isinstance(start_date, str):
-            start_date = datetime.strptime(start_date, "%Y-%m-%d")
-        if isinstance(end_date, str):
-            end_date = datetime.strptime(end_date, "%Y-%m-%d")
+    # Create a Data Feed
+    data = bt.feeds.PandasData(
+        dataname=df,
+        datetime=None,  # Use index as datetime
+        open="open",
+        high="high",
+        low="low",
+        close="close",
+        volume="volume",
+        openinterest=-1,
+    )
 
-        # Convert to UTC if not already
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=timezone.utc)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=timezone.utc)
+    # Add the Data Feed to Cerebro
+    cerebro.adddata(data)
 
-        # Convert timeframe string to TimeFrame enum
-        timeframe_map = {
-            "1m": TimeFrame.Minute,
-            "5m": TimeFrame.Minute,
-            "15m": TimeFrame.Minute,
-            "30m": TimeFrame.Minute,
-            "1h": TimeFrame.Hour,
-            "4h": TimeFrame.Hour,
-            "1d": TimeFrame.Day,
-        }
+    # Set our desired cash start
+    cerebro.broker.setcash(initial_capital)
 
-        if timeframe not in timeframe_map:
-            raise ValueError(f"Invalid timeframe: {timeframe}")
+    # Add a FixedSize sizer according to the stake
+    cerebro.addsizer(bt.sizers.PercentSizer, percents=10)
 
-        tf = timeframe_map[timeframe]
+    # Set the commission - 0.1% ... divide by 100 to remove the %
+    cerebro.broker.setcommission(commission=0.001)
 
-        # Add timeframe multiplier for non-standard intervals
-        timeframe_multiplier = {"5m": 5, "15m": 15, "30m": 30, "4h": 4}
+    # Add a strategy
+    cerebro.addstrategy(LLMStrategy)
 
-        multiplier = timeframe_multiplier.get(timeframe, 1)
-        if multiplier > 1:
-            tf = TimeFrame(tf.value * multiplier)
+    # Print out the starting conditions
+    logger.info(f"Starting Portfolio Value: ${cerebro.broker.getvalue():.2f}")
 
-        logger.info(
-            f"Running backtest for {symbol} from {start_date.strftime('%Y-%m-%d %H:%M')} to {end_date.strftime('%Y-%m-%d %H:%M')}"
-        )
+    # Run over everything
+    results = cerebro.run()
 
-        # Get historical data
-        logger.info("Fetching historical data...")
-        df = get_historical_data(symbol, start_date, end_date, tf)
+    # Get the strategy instance from the results
+    strategy = results[0]
 
-        if df.empty:
-            raise ValueError("No historical data available for the specified date range")
+    # Print out the final result
+    logger.info(f"Final Portfolio Value: ${cerebro.broker.getvalue():.2f}")
 
-        # Calculate indicators
-        logger.info("Calculating technical indicators...")
-        df = strategies.calculate_indicators(df)
-
-        # Group data by day and select a random day
-        df["date"] = df.index.date
-        available_days = sorted(df["date"].unique())
-
-        if len(available_days) == 0:
-            raise ValueError("No trading days available in the date range")
-
-        # Select a random day from available data
-        selected_day = np.random.choice(available_days)
-        day_data = df[df["date"] == selected_day]
-
-        if day_data.empty:
-            raise ValueError(f"No data available for selected day: {selected_day}")
-
-        if len(day_data) < 6:  # Ensure we have enough data points for meaningful analysis
-            raise ValueError(f"Insufficient data points ({len(day_data)}) for selected day: {selected_day}")
-
-        logger.info(f"\nSelected day for analysis: {selected_day}")
-        logger.info(f"Available data points: {len(day_data)}")
-        logger.info(f"Data range: {day_data.index[0].strftime('%H:%M')} to {day_data.index[-1].strftime('%H:%M')}")
-
-        # Initialize results
-        results: Dict[str, Any] = {
-            "trades": [],
-            "equity_curve": [],
-            "metrics": {
-                "total_trades": 0,
-                "day_trades": 0,
-                "swing_trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "win_rate": 0.0,
-                "total_pnl": 0.0,
-                "avg_win": 0.0,
-                "avg_loss": 0.0,
-                "profit_factor": 0.0,
-                "final_equity": initial_capital,
-                "total_return": 0.0,
-                "max_drawdown": 0.0,
-            },
-            "selected_day": selected_day.strftime("%Y-%m-%d"),
-        }
-
-        # Run simulation
-        position: int = 0
-        equity: float = initial_capital
-        entry_price: float = 0
-        entry_time: Optional[datetime] = None
-
-        # Get single LLM analysis for the selected day
-        logger.info("Getting LLM analysis...")
-        try:
-            # Set the analysis date to the selected day
-            analysis_date = datetime.combine(selected_day, datetime.min.time(), tzinfo=timezone.utc)
-            llm_prompt = strategies.get_llm_prompt(df, analysis_date=analysis_date)
-
-            if not llm_prompt:
-                raise ValueError("Failed to generate LLM prompt")
-
-            analysis = llm.get_trading_analysis(llm_prompt)
-
-            if not analysis or not isinstance(analysis, dict):
-                raise ValueError("Invalid LLM analysis response")
-
-            if "recommendation" not in analysis:
-                raise ValueError("LLM analysis missing recommendation")
-
-            logger.info("\nLLM Analysis:")
-            logger.info(llm.format_analysis_for_display(analysis))
-
-        except Exception as e:
-            logger.error(f"Error getting LLM analysis: {str(e)}")
-            return None
-
-        # Process each hour for the day
-        for i in range(len(day_data)):
-            current_data = day_data.iloc[i]
-            current_date = day_data.index[i]
-
-            # Check if we need to close position due to max hold time
-            if position != 0 and entry_time is not None:
-                hold_time = current_date - entry_time
-                trade_type = results["trades"][-1]["trade_type"] if results["trades"] else "day"
-                max_hold_time = timedelta(hours=6) if trade_type == "day" else timedelta(days=5)
-
-                if hold_time > max_hold_time:
-                    # Close position due to max hold time
-                    pnl = (current_data["close"] - entry_price) * position
-                    equity += pnl
-                    results["trades"].append(
-                        {
-                            "date": current_date.strftime("%Y-%m-%d %H:%M"),
-                            "type": "SELL",
-                            "price": current_data["close"],
-                            "quantity": position,
-                            "value": position * current_data["close"],
-                            "pnl": pnl,
-                            "reason": "max_hold_time",
-                            "trade_type": trade_type,
-                        }
-                    )
-                    position = 0
-                    entry_time = None
-
-            # Record equity
-            results["equity_curve"].append({"date": current_date.strftime("%Y-%m-%d %H:%M"), "equity": equity})
-
-            # Execute trades based on analysis
-            if analysis["recommendation"] == "BUY" and position <= 0:
-                # Get position size and trade type from LLM analysis
-                position_size_pct = float(analysis.get("position_size", 0.01))  # Default to 1% if not specified
-                trade_type = analysis.get("trade_type", "day")  # Default to day trade if not specified
-
-                # Ensure position size is within reasonable bounds
-                position_size_pct = max(0.005, min(position_size_pct, 0.05))  # Between 0.5% and 5%
-
-                position_size = equity * position_size_pct
-                qty = int(position_size / current_data["close"])
-                position = qty
-                entry_price = current_data["close"]
-                entry_time = current_date
-
-                # Update trade type counters
-                if trade_type == "day":
-                    results["metrics"]["day_trades"] += 1
-                else:
-                    results["metrics"]["swing_trades"] += 1
-
-                results["trades"].append(
-                    {
-                        "date": current_date.strftime("%Y-%m-%d %H:%M"),
-                        "type": "BUY",
-                        "price": current_data["close"],
-                        "quantity": qty,
-                        "value": qty * current_data["close"],
-                        "position_size_pct": position_size_pct * 100,
-                        "trade_type": trade_type,
-                    }
-                )
-
-            elif analysis["recommendation"] == "SELL" and position >= 0:
-                if position > 0:
-                    # Close long position
-                    pnl = (current_data["close"] - entry_price) * position
-                    equity += pnl
-                    trade_type = results["trades"][-1]["trade_type"] if results["trades"] else "day"
-                    results["trades"].append(
-                        {
-                            "date": current_date.strftime("%Y-%m-%d %H:%M"),
-                            "type": "SELL",
-                            "price": current_data["close"],
-                            "quantity": position,
-                            "value": position * current_data["close"],
-                            "pnl": pnl,
-                            "reason": "signal",
-                            "trade_type": trade_type,
-                        }
-                    )
-                    position = 0
-                    entry_time = None
-
-        # Close any remaining position at the end of the day
-        if position != 0:
-            pnl = (day_data.iloc[-1]["close"] - entry_price) * position
-            equity += pnl
-            trade_type = results["trades"][-1]["trade_type"] if results["trades"] else "day"
-            results["trades"].append(
-                {
-                    "date": day_data.index[-1].strftime("%Y-%m-%d %H:%M"),
-                    "type": "SELL",
-                    "price": day_data.iloc[-1]["close"],
-                    "quantity": position,
-                    "value": position * day_data.iloc[-1]["close"],
-                    "pnl": pnl,
-                    "reason": "end_of_day",
-                    "trade_type": trade_type,
-                }
-            )
-
-        # Calculate performance metrics
-        results["metrics"]["total_trades"] = len(results["trades"])
-        results["metrics"]["winning_trades"] = sum(1 for trade in results["trades"] if trade.get("pnl", 0) > 0)
-        results["metrics"]["losing_trades"] = sum(1 for trade in results["trades"] if trade.get("pnl", 0) < 0)
-        results["metrics"]["win_rate"] = float(
-            results["metrics"]["winning_trades"] / results["metrics"]["total_trades"]
-            if results["metrics"]["total_trades"] > 0
-            else 0
-        )
-        results["metrics"]["total_pnl"] = float(sum(trade.get("pnl", 0) for trade in results["trades"]))
-        results["metrics"]["final_equity"] = float(equity)
-        results["metrics"]["total_return"] = float((equity - initial_capital) / initial_capital * 100)
-
-        # Calculate average win and loss
-        winning_trades = [float(trade["pnl"]) for trade in results["trades"] if trade.get("pnl", 0) > 0]
-        losing_trades = [float(trade["pnl"]) for trade in results["trades"] if trade.get("pnl", 0) < 0]
-        results["metrics"]["avg_win"] = float(sum(winning_trades) / len(winning_trades) if winning_trades else 0)
-        results["metrics"]["avg_loss"] = float(sum(losing_trades) / len(losing_trades) if losing_trades else 0)
-
-        # Calculate profit factor
-        total_profit = float(sum(winning_trades) if winning_trades else 0)
-        total_loss = float(abs(sum(losing_trades)) if losing_trades else 0)
-        results["metrics"]["profit_factor"] = float(total_profit / total_loss if total_loss > 0 else float("inf"))
-
-        # Calculate max drawdown
-        results["metrics"]["max_drawdown"] = float(calculate_max_drawdown(results["equity_curve"]))
-
-        return results
-
-    except Exception as e:
-        logger.error(f"Error running backtest: {str(e)}")
-        return None
-
-
-def calculate_max_drawdown(equity_curve: Union[pd.Series, List[Dict[str, Any]]]) -> float:
-    """Calculate the maximum drawdown from an equity curve.
-
-    Computes the largest peak-to-trough decline in the equity curve,
-    expressed as a percentage.
-
-    Args:
-        equity_curve: Series or list of dictionaries containing equity values
-            over time.
-
-    Returns:
-        float: Maximum drawdown as a percentage (e.g., 0.15 for 15% drawdown).
-    """
-    # Convert list of dicts to Series if needed
-    if isinstance(equity_curve, list):
-        if not equity_curve:
-            return 0.0
-        equity_values = pd.Series([point["equity"] for point in equity_curve])
-    else:
-        equity_values = equity_curve
-
-    if equity_values.empty:
-        return 0.0
-
-    # Calculate running maximum
-    running_max = equity_values.expanding().max()
-
-    # Calculate drawdowns
-    drawdowns = (equity_values - running_max) / running_max * 100
-
-    # Get maximum drawdown
-    max_drawdown = abs(drawdowns.min())
-
-    return max_drawdown
+    return {
+        "initial_value": initial_capital,
+        "final_value": cerebro.broker.getvalue(),
+        "return": (cerebro.broker.getvalue() - initial_capital) / initial_capital,
+        "trades": strategy.trades,  # Add trades to the results
+    }
 
 
 def main() -> None:
-    """Main function to run backtests.
+    """Main function to run the backtest."""
+    logger.info("Starting backtest...")
 
-    Executes backtests for configured symbols and timeframes, saving results
-    and sending notifications via Discord.
-    """
-    # Set date range for backtest
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=30)  # Last 30 days
+    # Run backtest
+    results = run_backtest()
 
-    # Run backtest for each symbol
-    for symbol in TRADING_STRATEGY["symbols"]:
-        results = run_backtest(symbol, "1h", start_date, end_date)
-        if results:
-            # Save results to file
-            filename = f"backtest_results_{symbol}_{end_date.strftime('%Y%m%d')}.json"
-            with open(filename, "w") as f:
-                json.dump(results, f, indent=4)
-            logger.info(f"Backtest results saved to {filename}")
+    if results:
+        # Print results
+        logger.info("\nBacktest Results:")
+        logger.info("=" * 50)
+        logger.info(f"Initial Value: ${results['initial_value']:,.2f}")
+        logger.info(f"Final Value: ${results['final_value']:,.2f}")
+        logger.info(f"Total Return: {results['return']*100:.2f}%")
+
+        # Print trade summary
+        logger.info("\nTrade Summary:")
+        logger.info("=" * 50)
+        total_trades = len(results["trades"])
+        winning_trades = sum(1 for trade in results["trades"] if trade["status"] == "WIN")
+        losing_trades = total_trades - winning_trades
+        total_pnl = sum(trade["pnl"] for trade in results["trades"])
+        total_commission = sum(trade["pnl"] - trade["pnlcomm"] for trade in results["trades"])
+
+        logger.info(f"Total Trades: {total_trades}")
+        logger.info(f"Winning Trades: {winning_trades}")
+        logger.info(f"Losing Trades: {losing_trades}")
+        logger.info(f"Win Rate: {(winning_trades/total_trades*100):.2f}%")
+        logger.info(f"Total P&L: ${total_pnl:,.2f}")
+        logger.info(f"Total Commission: ${total_commission:,.2f}")
+
+        # Print individual trades
+        logger.info("\nIndividual Trades:")
+        logger.info("=" * 50)
+        for i, trade in enumerate(results["trades"], 1):
+            logger.info(f"\nTrade #{i}:")
+            logger.info(f"Entry Date: {trade['entry_date']}")
+            logger.info(f"Exit Date: {trade['exit_date']}")
+            logger.info(f"Entry Price: ${trade['entry_price']:.2f}")
+            logger.info(f"Exit Price: ${trade['exit_price']:.2f}")
+            logger.info(f"Size: {trade['size']}")
+            logger.info(f"P&L: ${trade['pnl']:.2f}")
+            logger.info(f"Net P&L (with commission): ${trade['pnlcomm']:.2f}")
+            logger.info(f"Status: {trade['status']}")
+
+        # Save results to file
+        output_dir = "backtest_results"
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"backtest_results_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+
+        with open(filepath, "w") as f:
+            json.dump(results, f, indent=2)
+
+        logger.info(f"\nResults saved to {filepath}")
+    else:
+        logger.error("Backtest failed")
 
 
 if __name__ == "__main__":

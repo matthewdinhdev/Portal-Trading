@@ -3,6 +3,23 @@ import os
 from datetime import datetime
 
 
+def get_log_level() -> int:
+    """Get the logging level from environment variable or default to INFO.
+
+    Returns:
+        int: The logging level (default: logging.INFO)
+    """
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    return log_levels.get(log_level_str, logging.INFO)
+
+
 def setup_logger(log_file="trading.log"):
     """Set up logging configuration with file and console handlers.
 
@@ -46,13 +63,16 @@ def setup_logger(log_file="trading.log"):
         handler.close()
         logger.removeHandler(handler)
 
+    # Get log level from environment variable
+    log_level = get_log_level()
+
     # Create file handler
     file_handler = logging.FileHandler(log_file, mode="a")
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(log_level)
 
     # Create console handler
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(log_level)
 
     # Create formatter
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -60,7 +80,7 @@ def setup_logger(log_file="trading.log"):
     console_handler.setFormatter(formatter)
 
     # Set up logger
-    logger.setLevel(logging.INFO)
+    logger.setLevel(log_level)
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
