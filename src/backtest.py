@@ -30,8 +30,9 @@ if not API_KEY or not SECRET_KEY:
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
 # Define test period
+TEST_TIMEFRAME = TimeFrame.Day
 TEST_START_DATE = datetime(2016, 1, 4, tzinfo=timezone.utc)  # First trading day of 2016
-TEST_END_DATE = datetime(2016, 1, 14, tzinfo=timezone.utc)
+TEST_END_DATE = datetime(2016, 6, 1, tzinfo=timezone.utc)
 
 
 class Trade:
@@ -43,17 +44,28 @@ class Trade:
         entry_price: float,
         stop_loss: float,
         take_profit: float,
-        trade_type: str,
         size: int,
         entry_date: str,
+        confidence: float,
     ):
-        self.type = type  # BUY or SELL
+        """Initialize a new trade.
+
+        Args:
+            type: Trade type (BUY/SELL)
+            entry_price: Entry price of the trade
+            stop_loss: Stop loss price
+            take_profit: Take profit price
+            size: Number of shares
+            entry_date: Entry date and time
+            confidence: Confidence level of the trade (0-1)
+        """
+        self.type = type
         self.entry_price = entry_price
         self.stop_loss = stop_loss
         self.take_profit = take_profit
-        self.trade_type = trade_type
         self.size = size
         self.entry_date = entry_date
+        self.confidence = confidence
         self.exit_date = None
         self.exit_price = None
         self.pnl = 0.0
@@ -95,7 +107,11 @@ class Trade:
                 self.exit_reason = "TAKE_PROFIT"
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert trade information to dictionary format."""
+        """Convert trade information to dictionary format.
+
+        Returns:
+            Dictionary containing all trade information
+        """
         return {
             "type": self.type,
             "entry_date": self.entry_date,
@@ -109,25 +125,29 @@ class Trade:
             "commission": self.commission,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
-            "trade_type": self.trade_type,
             "return_pct": self.return_pct,
             "exit_reason": self.exit_reason,
+            "confidence": self.confidence,
         }
 
 
 class LLMStrategy(bt.Strategy):
-    """
-    Strategy that uses LLM for trading decisions
-    """
+    """Strategy that uses LLM for trading decisions."""
 
     params = (("lookback_periods", 60),)
 
     def __init__(self):
+        """Initialize strategy parameters."""
         self.order = None
         self.current_trade = None
         self.trades = []  # List to store all trades
 
     def notify_order(self, order):
+        """Handle order notifications.
+
+        Args:
+            order: Order object from broker
+        """
         if order.status in [order.Submitted, order.Accepted]:
             return
 
@@ -144,6 +164,11 @@ class LLMStrategy(bt.Strategy):
         self.order = None
 
     def notify_trade(self, trade):
+        """Handle trade notifications.
+
+        Args:
+            trade: Trade object from broker
+        """
         if not trade.isclosed:
             return
 
@@ -167,21 +192,18 @@ class LLMStrategy(bt.Strategy):
         """Execute a trade based on LLM analysis.
 
         Args:
-            analysis: Dictionary containing trading analysis and recommendations.
+            analysis: Dictionary containing trading analysis and recommendations
         """
         logger.info(" . Executing trade")
         # Get position size as percentage from LLM analysis
-        position_size_pct = analysis.get("position_size", 0.1)  # Default to 10% if not specified
+        position_size_pct = analysis.get("position_size")
         available_cash = self.broker.getcash()
         position_value = available_cash * position_size_pct
         current_price = self.data.close[0]
 
         # Calculate number of shares based on position value
         size = int(position_value / current_price)
-
-        # Ensure minimum size of 1 share
-        if size < 1:
-            size = 1
+        size = 1 if size < 1 else size
 
         # Set variables for the order
         entry_price = current_price
@@ -217,13 +239,13 @@ class LLMStrategy(bt.Strategy):
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            trade_type=analysis["trade_type"],
             size=size,
             entry_date=self.data.datetime.datetime(0).strftime("%Y-%m-%d %H:%M:%S"),
+            confidence=analysis["confidence"],
         )
 
     def next(self):
-        """Main strategy logic"""
+        """Execute strategy logic for each bar."""
         current_date = self.data.datetime.datetime(0)
         logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -255,7 +277,11 @@ class LLMStrategy(bt.Strategy):
             self.execute_trade(analysis)
 
     def get_current_data(self):
-        """Get current market data for LLM analysis."""
+        """Get current market data for LLM analysis.
+
+        Returns:
+            DataFrame containing current market data and indicators
+        """
         # Create DataFrame with current market data
         df = pd.DataFrame()
         df["datetime"] = [self.data.datetime.datetime(i) for i in range(-self.p.lookback_periods, 1)]
@@ -274,10 +300,17 @@ class LLMStrategy(bt.Strategy):
         return df
 
     def get_llm_analysis(self, data):
-        """Get trading analysis from LLM"""
+        """Get trading analysis from LLM.
+
+        Args:
+            data: Market data for analysis
+
+        Returns:
+            Dictionary containing trading analysis or None if error
+        """
         logger.info(" . Getting LLM analysis")
 
-        # Create account information dictionary with only actual account metrics
+        # Create account information dictionary with account metrics
         account_info = {
             "portfolio_value": self.broker.getvalue(),
             "cash": self.broker.getcash(),
@@ -309,10 +342,20 @@ class LLMStrategy(bt.Strategy):
         return analysis
 
 
-def get_historical_data(
-    symbol: str, start_date: datetime, end_date: datetime, timeframe: TimeFrame = TimeFrame.Hour
-) -> pd.DataFrame:
-    """Get historical data for a symbol from Alpaca."""
+def get_historical_data(symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """Get historical data for a symbol from Alpaca.
+
+    Args:
+        symbol: Trading symbol (e.g., 'AAPL')
+        start_date: Start date for data
+        end_date: End date for data
+
+    Returns:
+        DataFrame containing historical market data
+
+    Raises:
+        ValueError: If no data is available for the specified date range
+    """
     logger.info(" . Fetching historical data")
     # Convert to UTC if not already
     if start_date.tzinfo is None:
@@ -322,7 +365,9 @@ def get_historical_data(
 
     logger.info(f"Requesting data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
-    request_params = StockBarsRequest(symbol_or_symbols=symbol, timeframe=timeframe, start=start_date, end=end_date)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=symbol, timeframe=TEST_TIMEFRAME, start=start_date, end=end_date
+    )
 
     bars = data_client.get_stock_bars(request_params)
     df = bars.df
@@ -341,7 +386,15 @@ def run_backtest(
     symbol: str = "SPY",
     initial_capital: float = 100000,
 ) -> Optional[Dict[str, Any]]:
-    """Run a backtest using Backtrader."""
+    """Run a backtest using Backtrader.
+
+    Args:
+        symbol: Trading symbol to backtest (default: 'SPY')
+        initial_capital: Initial capital for backtest (default: 100000)
+
+    Returns:
+        Dictionary containing backtest results or None if error
+    """
     logger.info(
         f"Running backtest for {symbol} from {TEST_START_DATE.strftime('%Y-%m-%d')} to {TEST_END_DATE.strftime('%Y-%m-%d')}"
     )
@@ -349,7 +402,7 @@ def run_backtest(
     # Calculate lookback start date
     lookback_start = TEST_START_DATE - timedelta(days=30)  # Add 30 days for indicators
 
-    df = get_historical_data(symbol, lookback_start, TEST_END_DATE, TimeFrame.Hour)
+    df = get_historical_data(symbol, lookback_start, TEST_END_DATE)
 
     if df.empty:
         raise ValueError("No historical data available for the specified date range")
@@ -469,7 +522,7 @@ def run_backtest(
 
 
 def main() -> None:
-    """Main function to run the backtest."""
+    """Run the backtest and save results."""
     logger.info("Starting backtest...")
 
     # Run backtest
@@ -505,6 +558,7 @@ def main() -> None:
         logger.info("=" * 50)
         for i, trade in enumerate(results["trades"], 1):
             logger.info(f"\nTrade #{i}:")
+            logger.info(f"Trade Type: ({trade['type']})")
             logger.info(f"Entry Date: {trade['entry_date']}")
             logger.info(f"Exit Date: {trade['exit_date']}")
             logger.info(f"Entry Price: ${trade['entry_price']:.2f}")
@@ -516,6 +570,7 @@ def main() -> None:
             logger.info(f"Stop Loss: ${trade['stop_loss']:.2f}")
             logger.info(f"Take Profit: ${trade['take_profit']:.2f}")
             logger.info(f"Exit Reason: {trade['exit_reason']}")
+            logger.info(f"Confidence: {trade['confidence']*100:.1f}%")
 
         # Save results to file
         output_dir = "backtest_results"

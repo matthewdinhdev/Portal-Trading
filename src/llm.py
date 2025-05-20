@@ -36,29 +36,24 @@ LLM_EXAMPLE_TEMPLATE = {
         "take_profit": 201.65,  # Number: Must be a positive number without $ symbol
     },
     "position_size": 0.35,  # Number: Must be a decimal between 0 and 1
-    "trade_type": "DAY",  # String: Must be exactly "DAY" or "SWING"
 }
 
 
 def format_for_llm(
     df: pd.DataFrame, lookback_periods: int = 48, analysis_date: Optional[datetime] = None
 ) -> List[Dict[str, Any]]:
-    """Format market data for LLM consumption.
-
-    Creates a structured representation of market data including price,
-    technical indicators, and market context for a specific time period.
+    """Format market data for LLM analysis.
 
     Args:
-        df: DataFrame containing market data and technical indicators.
-        lookback_periods: Number of periods to look back (default: 48).
-        analysis_date: Optional specific date to analyze (default: None).
+        df: Market data and technical indicators
+        lookback_periods: Number of periods to analyze (default: 48)
+        analysis_date: Specific date to analyze (default: None)
 
     Returns:
-        List[Dict[str, Any]]: List of dictionaries containing formatted
-            market data and indicators.
+        List of dictionaries containing formatted market data
 
     Raises:
-        ValueError: If insufficient data is available for the analysis.
+        ValueError: If insufficient data is available
     """
     # If analysis_date is provided, find the index for that date
     if analysis_date is not None:
@@ -201,23 +196,20 @@ def generate_llm_strategy_prompt(
     lookback_periods: int = 48,
     analysis_date: Optional[datetime] = None,
 ) -> Optional[str]:
-    """Generate a prompt for the LLM based on market data and account information.
-
-    Creates a comprehensive prompt including market data, technical indicators,
-    account information, and current positions for the LLM to analyze.
+    """Generate trading analysis prompt for LLM.
 
     Args:
-        df: DataFrame containing market data and technical indicators.
-        account_info: Optional dictionary containing account information.
-        positions: Optional list of current positions.
-        lookback_periods: Number of periods to look back (default: 48).
-        analysis_date: Optional specific date to analyze (default: None).
+        df: Market data and technical indicators
+        account_info: Account information dictionary
+        positions: List of current positions
+        lookback_periods: Number of periods to analyze (default: 48)
+        analysis_date: Specific date to analyze (default: None)
 
     Returns:
-        Optional[str]: Formatted prompt string for the LLM, or None if there's an error.
+        Formatted prompt string or None if error
     """
     try:
-        logger.info(" . Generating LLM prompt")
+        logger.info("  . Generating LLM strategy prompt")
 
         if df.empty:
             logger.error("Empty DataFrame provided")
@@ -349,13 +341,12 @@ def query_ollama(prompt: str) -> Optional[str]:
     """Query Ollama API for trading analysis.
 
     Args:
-        prompt: The user prompt containing market data
-        system_prompt: The system prompt defining the response format
+        prompt: Trading analysis prompt
 
     Returns:
-        Optional[str]: The model's response or None if there's an error
+        Model's response or None if error
     """
-    logger.info(" . Querying Ollama")
+    logger.info("  . Querying Ollama")
     url = "http://localhost:11434/api/generate"
 
     payload = {
@@ -374,15 +365,11 @@ def query_ollama(prompt: str) -> Optional[str]:
     raw_response = response.json()["response"]
     logger.debug(f"Raw response: {raw_response}")
 
-    try:
-        # Clean the response string
-        # Remove any control characters
-        cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
+    # Clean the response string
+    # Remove any control characters
+    cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
 
-        return cleaned_response
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON response from LLM: {str(e)}")
-        return None
+    return cleaned_response
 
 
 def get_llm_response(
@@ -392,18 +379,17 @@ def get_llm_response(
     lookback_periods: int = 20,
     analysis_date: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Get trading analysis from LLM based on market data and account information.
+    """Get trading analysis from LLM.
 
     Args:
-        df: DataFrame containing market data.
-        account_info: Optional dictionary containing account information.
-        positions: Optional list of dictionaries containing current positions.
-        lookback_periods: Number of periods to look back for analysis (default: 20).
-        analysis_date: Optional datetime for the analysis (default: current time).
+        df: Market data
+        account_info: Account information dictionary
+        positions: List of current positions
+        lookback_periods: Number of periods to analyze (default: 20)
+        analysis_date: Specific date to analyze (default: None)
 
     Returns:
-        Optional[Dict[str, Any]]: Dictionary containing LLM's trading analysis and
-            recommendations, or None if there's an error.
+        Dictionary containing trading analysis or None if error
     """
     logger.info(" . Generating LLM response")
 
@@ -415,43 +401,29 @@ def get_llm_response(
 
     # Enhance the system prompt to ensure JSON-only response
     prompt = f"""
-    CRITICAL: You are a quantitative trading algorithm with expertise in technical analysis, statistical arbitrage, and market microstructure. 
-
-    Your response MUST use this EXACT structure with these EXACT types:
+    CRITICAL: You are a quantitative trading algorithm. Your response MUST use this EXACT structure:
     {{
-        "recommendation": "BUY",  // String: Must be exactly "BUY", "SELL", or "HOLD"
-        "confidence": 0.85,       // Number: Must be a single decimal between 0 and 1
-        "reasoning": "string",    // String: Technical analysis reasoning
-        "price_targets": {{       // Object: Contains stop loss and take profit
-            "stop_loss": 194.00,  // Number: Must be a positive number without $ symbol
-            "take_profit": 201.65 // Number: Must be a positive number without $ symbol
+        "recommendation": "BUY",  // Must be "BUY", "SELL", or "HOLD"
+        "confidence": 0.85,       // Decimal between 0 and 1
+        "reasoning": "string",    // Technical analysis reasoning
+        "price_targets": {{       // Stop loss and take profit
+            "stop_loss": 194.00,  // Positive number without $ symbol
+            "take_profit": 201.65 // Positive number without $ symbol
         }},
-        "position_size": 0.35,    // Number: Must be a decimal between 0 and 1
-        "trade_type": "DAY"       // String: Must be exactly "DAY" or "SWING"
+        "position_size": 0.35,    // Decimal between 0 and 1
+        "trade_type": "DAY"       // Must be "DAY" or "SWING"
     }}
 
-    DO NOT:
-    - Add any text outside the JSON
-    - Add comments or currency symbols
-    - Modify the JSON structure or field names
-    - Change value cases (e.g., "Swing" vs "SWING")
-
     TRADING RULES:
-    1. Base your analysis on quantitative metrics and technical indicators
-    2. Consider market microstructure and order flow
-    3. Use statistical significance in your confidence levels
-    4. Factor in volatility and market regime
-    5. Consider correlation with broader market indices
-    6. Account for trading session and time of day
-    7. Factor in volume profile and liquidity
-
-    POSITION SIZING CONSIDERATIONS:
-    - Position size should be determined by your confidence in the trade and current market conditions
-    - Consider the current portfolio value and existing positions
-    - Factor in market volatility and liquidity
-    - Ensure position size aligns with your confidence level
-    - Consider risk management and portfolio diversification
-    - Account for the trade type (day vs swing)
+    1. Default to HOLD unless there's clear evidence for BUY/SELL
+    2. Require multiple confirming signals for BUY/SELL:
+       - Technical indicators alignment
+       - Volume confirmation
+       - Clear support/resistance
+       - Strong trend
+       - Favorable risk/reward
+    3. Position size should reflect confidence level
+    4. Consider market conditions and volatility
 
     {stat_info}
     """
@@ -465,7 +437,7 @@ def get_llm_response(
 
         analysis = json.loads(response_text)
         analysis = prompt_validation_and_formatting(analysis)
-        logger.info(analysis)
+        logger.info(f"LLM response: {analysis}")
 
         return analysis
     else:
@@ -485,13 +457,13 @@ def get_llm_response(
 
 
 def prompt_validation_and_formatting(analysis: Dict[str, Any]) -> Optional[str]:
-    """Validate and format the prompt for the LLM.
+    """Validate and format LLM response.
 
     Args:
-        prompt: The user prompt containing market data
+        analysis: LLM response dictionary
 
     Returns:
-        Optional[str]: The formatted prompt or None if there's an error
+        Formatted analysis or None if invalid
     """
     # Validate required fields from LLM_EXAMPLE_TEMPLATE
     required_fields = LLM_EXAMPLE_TEMPLATE.keys()
@@ -604,16 +576,3 @@ def get_existing_analysis(symbol: str, output_dir: str = "analysis") -> Optional
 
     logger.debug(f" . No existing analysis found for {symbol} at {filepath}")
     return None
-
-
-if __name__ == "__main__":
-    # Example usage
-    import pandas as pd
-
-    # Load some sample data
-    df = pd.read_csv("sample_data.csv", index_col=0, parse_dates=True)
-
-    # Get and display the analysis
-    analysis = get_llm_response(df)
-    if analysis:
-        save_analysis(analysis, "AAPL")
