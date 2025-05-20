@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import logging
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Any
 
 # Get logger
 logger = logging.getLogger(__name__)
@@ -384,7 +384,9 @@ def format_for_llm(
                 "volume_trend": (
                     "high"
                     if df["volume_ratio"].iloc[i] > 1.5
-                    else "low" if df["volume_ratio"].iloc[i] < 0.5 else "normal"
+                    else "low"
+                    if df["volume_ratio"].iloc[i] < 0.5
+                    else "normal"
                 ),
                 "volatility_state": (
                     "high" if df["volatility"].iloc[i] > df["volatility"].rolling(20).mean().iloc[i] else "low"
@@ -425,7 +427,7 @@ def format_for_llm(
     return llm_data
 
 
-def get_llm_prompt(
+def generate_llm_strategy_prompt(
     df: pd.DataFrame,
     account_info: Optional[Dict[str, Any]] = None,
     positions: Optional[List[Dict[str, Any]]] = None,
@@ -485,27 +487,23 @@ def get_llm_prompt(
         prompt = [
             f"Trading Analysis ({analysis_date.strftime('%Y-%m-%d') if analysis_date else datetime.now().strftime('%Y-%m-%d')})",
             "=" * 40,
-            "",
-            "Based on the following market data and account information, provide a trading signal (BUY, SELL, or HOLD) and explain your reasoning:",
-            "",
             "Account Information:",
         ]
 
         # Add account information if available
-        if account_info:
-            prompt.extend(
-                [
-                    f"- Portfolio Value: ${account_info['portfolio_value']:,.2f}",
-                    f"- Available Cash: ${account_info['cash']:,.2f}",
-                    f"- Buying Power: ${account_info['buying_power']:,.2f}",
-                    f"- Day Trade Count: {account_info['daytrade_count']}",
-                    f"- Pattern Day Trader: {'Yes' if account_info['pattern_day_trader'] else 'No'}",
-                    f"- Shorting Enabled: {'Yes' if account_info['shorting_enabled'] else 'No'}",
-                    f"- Account Status: {account_info['status']}",
-                ]
-            )
-        else:
-            prompt.append("- Account information not available")
+        if not account_info:
+            raise ValueError("Account information not available")
+        prompt.extend(
+            [
+                f"- Portfolio Value: ${account_info['portfolio_value']:,.2f}",
+                f"- Available Cash: ${account_info['cash']:,.2f}",
+                f"- Buying Power: ${account_info['buying_power']:,.2f}",
+                f"- Day Trade Count: {account_info['daytrade_count']}",
+                f"- Pattern Day Trader: {'Yes' if account_info['pattern_day_trader'] else 'No'}",
+                f"- Shorting Enabled: {'Yes' if account_info['shorting_enabled'] else 'No'}",
+                f"- Account Status: {account_info['status']}",
+            ]
+        )
 
         # Add current positions if available
         if positions:
@@ -569,26 +567,6 @@ def get_llm_prompt(
                 f"- {period['timestamp']}: ${period['close']:.2f} "
                 f"(RSI: {period['rsi']:.2f}, MACD: {period['macd']:.2f})"
             )
-
-        prompt.extend(
-            [
-                "",
-                "Please provide your analysis and trading recommendation, considering both technical indicators and market context.",
-                "Include:",
-                "1. Overall market sentiment",
-                "2. Key technical signals",
-                "3. Risk assessment",
-                "4. Clear trading recommendation (BUY/SELL/HOLD)",
-                "5. Brief explanation of your reasoning",
-                "6. Specific price targets based on support/resistance levels and ATR",
-                "7. Position sizing recommendation based on account equity and risk tolerance",
-                "",
-                "For price targets, use the following format:",
-                "- stop_loss: Use either the ATR-based stop loss or the nearest support level",
-                "- take_profit: Use either the ATR-based take profit or the nearest resistance level",
-                "Example: stop_loss: 150.25, take_profit: 165.50",
-            ]
-        )
 
         final_prompt = "\n".join(prompt)
         return final_prompt

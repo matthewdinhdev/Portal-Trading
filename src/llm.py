@@ -4,11 +4,9 @@ import requests
 from dotenv import load_dotenv
 import json
 from datetime import datetime
-import re
 import logging
 from typing import Dict, List, Optional, Any
 import pandas as pd
-from strategies import get_llm_prompt
 from logger import setup_logger
 from main import PAPER_TRADING
 
@@ -21,7 +19,6 @@ load_dotenv()
 # Initialize OpenAI client
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-
 # Set up logger
 logger = setup_logger("paper_trading.log")
 
@@ -29,18 +26,323 @@ logger = setup_logger("paper_trading.log")
 USE_OLLAMA = os.getenv("USE_OLLAMA", "false").lower() == "true"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-llm:7b")
 
-# Define JSON template for LLM responses
-LLM_RESPONSE_TEMPLATE = {
-    "recommendation": "<recommendation>",  # Must be one of: "BUY", "SELL", "HOLD"
-    "confidence": "<confidence>",  # Decimal between 0 and 1
-    "reasoning": "<reasoning>",  # Single string with technical analysis reasoning
-    "price_targets": {
-        "stop_loss": "<stop_loss>",  # REQUIRED: Numeric value for stop loss
-        "take_profit": "<take_profit>",  # REQUIRED: Numeric value for take profit
+# Define example template for LLM responses
+LLM_EXAMPLE_TEMPLATE = {
+    "recommendation": "BUY",  # String: Must be exactly "BUY", "SELL", or "HOLD"
+    "confidence": 0.85,  # Number: Must be a single decimal between 0 and 1
+    "reasoning": "Strong bullish momentum with increasing volume and positive RSI divergence. Price action shows higher lows forming a potential reversal pattern.",  # String: Technical analysis reasoning
+    "price_targets": {  # Object: Contains stop loss and take profit
+        "stop_loss": 194.00,  # Number: Must be a positive number without $ symbol
+        "take_profit": 201.65,  # Number: Must be a positive number without $ symbol
     },
-    "position_size": "<position_size>",  # Decimal between 0 and 1
-    "trade_type": "<trade_type>",  # Must be "day" or "swing"
+    "position_size": 0.35,  # Number: Must be a decimal between 0 and 1
+    "trade_type": "DAY",  # String: Must be exactly "DAY" or "SWING"
 }
+
+
+def format_for_llm(
+    df: pd.DataFrame, lookback_periods: int = 48, analysis_date: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
+    """Format market data for LLM consumption.
+
+    Creates a structured representation of market data including price,
+    technical indicators, and market context for a specific time period.
+
+    Args:
+        df: DataFrame containing market data and technical indicators.
+        lookback_periods: Number of periods to look back (default: 48).
+        analysis_date: Optional specific date to analyze (default: None).
+
+    Returns:
+        List[Dict[str, Any]]: List of dictionaries containing formatted
+            market data and indicators.
+
+    Raises:
+        ValueError: If insufficient data is available for the analysis.
+    """
+    # If analysis_date is provided, find the index for that date
+    if analysis_date is not None:
+        if isinstance(analysis_date, datetime):
+            analysis_date = analysis_date.date()
+
+        # Get all data up to and including the analysis date
+        df = df[df.index.date <= analysis_date]
+
+        if df.empty:
+            raise ValueError(f"No data available for analysis date: {analysis_date}")
+
+    # Ensure we have enough data points
+    if len(df) < 5:
+        logger.warning(f"Insufficient data points. Need at least 5 periods, got {len(df)}")
+        return []
+
+    # Create a list to store our formatted data
+    llm_data: List[Dict[str, Any]] = []
+
+    # Get the last data point for analysis
+    try:
+        i = len(df) - 1  # Use the last data point
+
+        current_price = df["close"].iloc[i]
+        price_change_1h = float(df["returns"].iloc[i])
+
+        # Calculate multi-period changes safely
+        price_change_5h = 0.0
+        price_change_20h = 0.0
+        price_change_48h = 0.0
+        if i >= 5:
+            price_change_5h = float(df["close"].iloc[i] / df["close"].iloc[i - 5] - 1)
+        if i >= 20:
+            price_change_20h = float(df["close"].iloc[i] / df["close"].iloc[i - 20] - 1)
+        if i >= 48:
+            price_change_48h = float(df["close"].iloc[i] / df["close"].iloc[i - 48] - 1)
+
+        current_data = {
+            "timestamp": df.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price_data": {
+                "open": float(df["open"].iloc[i]),
+                "high": float(df["high"].iloc[i]),
+                "low": float(df["low"].iloc[i]),
+                "close": float(current_price),
+                "volume": float(df["volume"].iloc[i]),
+                "price_changes": {
+                    "1h": price_change_1h,
+                    "5h": price_change_5h,
+                    "20h": price_change_20h,
+                    "48h": price_change_48h,
+                },
+            },
+            "trend_indicators": {
+                "sma_20": float(df["SMA_20"].iloc[i]),
+                "sma_50": float(df["SMA_50"].iloc[i]),
+                "sma_200": float(df["SMA_200"].iloc[i]),
+                "ema_20": float(df["EMA_20"].iloc[i]),
+                "ema_50": float(df["EMA_50"].iloc[i]),
+            },
+            "momentum_indicators": {
+                "rsi": float(df["RSI"].iloc[i]),
+                "macd": float(df["MACD"].iloc[i]),
+                "macd_signal": float(df["MACD_signal"].iloc[i]),
+                "macd_hist": float(df["MACD_hist"].iloc[i]),
+                "stochastic_k": float(df["%K"].iloc[i]),
+                "stochastic_d": float(df["%D"].iloc[i]),
+            },
+            "volatility_indicators": {
+                "bollinger_upper": float(df["BB_upper"].iloc[i]),
+                "bollinger_middle": float(df["BB_middle"].iloc[i]),
+                "bollinger_lower": float(df["BB_lower"].iloc[i]),
+                "atr": float(df["ATR"].iloc[i]),
+                "volatility": float(df["volatility"].iloc[i]),
+            },
+            "volume_indicators": {
+                "volume_ma_20": float(df["volume_ma_20"].iloc[i]),
+                "volume_ratio": float(df["volume_ratio"].iloc[i]),
+            },
+            "market_context": {
+                "price_change_1h": price_change_1h,
+                "price_change_5h": price_change_5h,
+                "price_change_20h": price_change_20h,
+                "price_change_48h": price_change_48h,
+                "momentum": float(df["momentum"].iloc[i]),
+                "rate_of_change": float(df["rate_of_change"].iloc[i]),
+            },
+            "historical_context": {
+                "price_trend": "up" if df["close"].iloc[i] > df["SMA_20"].iloc[i] else "down",
+                "volume_trend": (
+                    "high"
+                    if df["volume_ratio"].iloc[i] > 1.5
+                    else "low"
+                    if df["volume_ratio"].iloc[i] < 0.5
+                    else "normal"
+                ),
+                "volatility_state": (
+                    "high" if df["volatility"].iloc[i] > df["volatility"].rolling(20).mean().iloc[i] else "low"
+                ),
+                "rsi_state": (
+                    "overbought" if df["RSI"].iloc[i] > 70 else "oversold" if df["RSI"].iloc[i] < 30 else "neutral"
+                ),
+                "trend_strength": (
+                    "strong" if abs(price_change_48h) > 0.1 else "moderate" if abs(price_change_48h) > 0.05 else "weak"
+                ),
+            },
+        }
+
+        # Add previous periods' data for context
+        current_data["previous_periods"] = []
+        for j in range(1, min(lookback_periods + 1, i + 1)):
+            prev_data = {
+                "timestamp": df.index[i - j].strftime("%Y-%m-%d %H:%M"),
+                "close": float(df["close"].iloc[i - j]),
+                "volume": float(df["volume"].iloc[i - j]),
+                "rsi": float(df["RSI"].iloc[i - j]),
+                "macd": float(df["MACD"].iloc[i - j]),
+            }
+            current_data["previous_periods"].append(prev_data)
+
+        llm_data.append(current_data)
+
+    except Exception as e:
+        logger.error(f"Error processing data point: {str(e)}")
+        logger.error(f"DataFrame info:\n{df.info()}")
+        logger.error(f"DataFrame head:\n{df.head()}")
+        raise ValueError(f"Failed to process data: {str(e)}")
+
+    if not llm_data:
+        logger.warning("No valid data points could be processed")
+        return []
+
+    return llm_data
+
+
+def generate_llm_strategy_prompt(
+    df: pd.DataFrame,
+    account_info: Optional[Dict[str, Any]] = None,
+    positions: Optional[List[Dict[str, Any]]] = None,
+    lookback_periods: int = 48,
+    analysis_date: Optional[datetime] = None,
+) -> Optional[str]:
+    """Generate a prompt for the LLM based on market data and account information.
+
+    Creates a comprehensive prompt including market data, technical indicators,
+    account information, and current positions for the LLM to analyze.
+
+    Args:
+        df: DataFrame containing market data and technical indicators.
+        account_info: Optional dictionary containing account information.
+        positions: Optional list of current positions.
+        lookback_periods: Number of periods to look back (default: 48).
+        analysis_date: Optional specific date to analyze (default: None).
+
+    Returns:
+        Optional[str]: Formatted prompt string for the LLM, or None if there's an error.
+    """
+    try:
+        logger.info(" . Generating LLM prompt")
+
+        if df.empty:
+            logger.error("Empty DataFrame provided")
+            raise ValueError("No data available for analysis")
+
+        # Get formatted data first
+        llm_data = format_for_llm(df, lookback_periods, analysis_date)
+
+        if not llm_data:
+            logger.warning("No valid data points could be processed")
+            return None
+
+        # Get the most recent data point
+        current = llm_data[-1]
+
+        # Calculate support and resistance levels safely
+        recent_lows = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
+        recent_highs = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
+
+        if not recent_lows or not recent_highs:
+            logger.warning("Insufficient data for support/resistance calculation")
+            return None
+
+        support_level = min(recent_lows)
+        resistance_level = max(recent_highs)
+
+        # Calculate ATR-based price levels
+        atr = current["volatility_indicators"]["atr"]
+        current_price = current["price_data"]["close"]
+        stop_loss_level = current_price - (2 * atr)  # 2 ATR below current price
+        take_profit_level = current_price + (4 * atr)
+
+        # Format the prompt with clear sections and better readability
+        prompt = [
+            f"Trading Analysis ({analysis_date.strftime('%Y-%m-%d') if analysis_date else datetime.now().strftime('%Y-%m-%d')})",
+            "=" * 40,
+            "Account Information:",
+        ]
+
+        # Add account information if available
+        if not account_info:
+            raise ValueError("Account information not available")
+        prompt.extend(
+            [
+                f"- Portfolio Value: ${account_info['portfolio_value']:,.2f}",
+                f"- Available Cash: ${account_info['cash']:,.2f}",
+                f"- Buying Power: ${account_info['buying_power']:,.2f}",
+                f"- Day Trade Count: {account_info['daytrade_count']}",
+                f"- Pattern Day Trader: {'Yes' if account_info['pattern_day_trader'] else 'No'}",
+                f"- Shorting Enabled: {'Yes' if account_info['shorting_enabled'] else 'No'}",
+                f"- Account Status: {account_info['status']}",
+            ]
+        )
+
+        # Add current positions if available
+        if positions:
+            prompt.extend(["", "Current Positions:"])
+            for position in positions:
+                prompt.extend(
+                    [
+                        f"- {position['symbol']}:",
+                        f"  Quantity: {position['qty']}",
+                        f"  Average Entry: ${position['avg_entry_price']:.2f}",
+                        f"  Current Price: ${position['current_price']:.2f}",
+                        f"  Market Value: ${position['market_value']:,.2f}",
+                        f"  Unrealized P/L: ${position['unrealized_pl']:,.2f} ({position['unrealized_plpc']*100:+.2f}%)",
+                        f"  Today's Change: {position['change_today']*100:+.2f}%",
+                    ]
+                )
+        else:
+            prompt.append("- No current positions")
+
+        # Add market data
+        prompt.extend(
+            [
+                "",
+                f"Current Market Conditions ({current['timestamp']}):",
+                f"- Price: ${current['price_data']['close']:.2f}",
+                f"- Hourly Change: {current['price_data']['price_changes']['1h']*100:+.2f}%",
+                f"- 5-Hour Change: {current['price_data']['price_changes']['5h']*100:+.2f}%",
+                f"- 20-Hour Change: {current['price_data']['price_changes']['20h']*100:+.2f}%",
+                f"- 48-Hour Change: {current['price_data']['price_changes']['48h']*100:+.2f}%",
+                "",
+                "Price Levels:",
+                f"- Support Level: ${support_level:.2f}",
+                f"- Resistance Level: ${resistance_level:.2f}",
+                f"- ATR-Based Stop Loss: ${stop_loss_level:.2f}",
+                f"- ATR-Based Take Profit: ${take_profit_level:.2f}",
+                "",
+                "Technical Indicators:",
+                f"- RSI: {current['momentum_indicators']['rsi']:.2f}",
+                f"- MACD: {current['momentum_indicators']['macd']:.2f}",
+                f"- MACD Signal: {current['momentum_indicators']['macd_signal']:.2f}",
+                f"- MACD Histogram: {current['momentum_indicators']['macd_hist']:.2f}",
+                f"- Stochastic K: {current['momentum_indicators']['stochastic_k']:.2f}",
+                f"- Stochastic D: {current['momentum_indicators']['stochastic_d']:.2f}",
+                f"- Volume Ratio: {current['volume_indicators']['volume_ratio']:.2f}",
+                f"- Volatility: {current['volatility_indicators']['volatility']:.2f}",
+                "",
+                "Market Context:",
+                f"- Price Trend: {current['historical_context']['price_trend']}",
+                f"- Volume Trend: {current['historical_context']['volume_trend']}",
+                f"- Volatility State: {current['historical_context']['volatility_state']}",
+                f"- RSI State: {current['historical_context']['rsi_state']}",
+                f"- Trend Strength: {current['historical_context']['trend_strength']}",
+                "",
+                "Recent Price History (Last 48 Hours):",
+            ]
+        )
+
+        # Add recent price history (last 48 hours)
+        for period in current["previous_periods"][:48]:
+            prompt.append(
+                f"- {period['timestamp']}: ${period['close']:.2f} "
+                f"(RSI: {period['rsi']:.2f}, MACD: {period['macd']:.2f})"
+            )
+
+        final_prompt = "\n".join(prompt)
+        return final_prompt
+
+    except Exception as e:
+        logger.error(f"Error generating LLM prompt: {str(e)}")
+        logger.error(f"DataFrame info:\n{df.info()}")
+        logger.error(f"DataFrame head:\n{df.head()}")
+        return None
 
 
 def query_ollama(prompt: str) -> Optional[str]:
@@ -77,8 +379,6 @@ def query_ollama(prompt: str) -> Optional[str]:
         # Remove any control characters
         cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
 
-        # Parse the JSON
-        analysis = json.loads(cleaned_response)
         return cleaned_response
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON response from LLM: {str(e)}")
@@ -94,10 +394,6 @@ def get_llm_response(
 ) -> Optional[Dict[str, Any]]:
     """Get trading analysis from LLM based on market data and account information.
 
-    Generates a prompt from market data and account information, then sends it to
-    the LLM for analysis. The LLM returns a structured analysis with trading
-    recommendations.
-
     Args:
         df: DataFrame containing market data.
         account_info: Optional dictionary containing account information.
@@ -109,31 +405,36 @@ def get_llm_response(
         Optional[Dict[str, Any]]: Dictionary containing LLM's trading analysis and
             recommendations, or None if there's an error.
     """
-    logger.info(f" . Generating LLM response")
+    logger.info(" . Generating LLM response")
 
     # Generate prompt
-    prompt = get_llm_prompt(df, account_info, positions, lookback_periods, analysis_date)
-    if not prompt:
-        logger.error("Failed to generate LLM prompt")
+    stat_info = generate_llm_strategy_prompt(df, account_info, positions, lookback_periods, analysis_date)
+    if not stat_info:
+        logger.error("Failed to generate stat information")
         return None
 
     # Enhance the system prompt to ensure JSON-only response
-    prompt = f"""{prompt}
+    prompt = f"""
+    CRITICAL: You are a quantitative trading algorithm with expertise in technical analysis, statistical arbitrage, and market microstructure. 
 
-    CRITICAL: You are a quantitative trading algorithm with expertise in technical analysis, statistical arbitrage, and market microstructure. Your response must be ONLY a valid JSON object. No other text, explanations, or formatting.
-    The response must be parseable by Python's json.loads() function.
-    
-    You MUST use this EXACT template structure. ALL fields are REQUIRED. Replace each placeholder tag with the appropriate value:
-    - <recommendation>: REQUIRED - Must be one of "BUY", "SELL", "HOLD" (exact case)
-    - <confidence>: REQUIRED - Decimal between 0 and 1
-    - <reasoning>: REQUIRED - Single string with technical analysis reasoning
-    - <stop_loss>: REQUIRED - Numeric value for stop loss
-    - <take_profit>: REQUIRED - Numeric value for take profit
-    - <position_size>: REQUIRED - Decimal between 0 and 1
-    - <trade_type>: REQUIRED - Must be exactly "day" or "swing" (lowercase)
+    Your response MUST use this EXACT structure with these EXACT types:
+    {{
+        "recommendation": "BUY",  // String: Must be exactly "BUY", "SELL", or "HOLD"
+        "confidence": 0.85,       // Number: Must be a single decimal between 0 and 1
+        "reasoning": "string",    // String: Technical analysis reasoning
+        "price_targets": {{       // Object: Contains stop loss and take profit
+            "stop_loss": 194.00,  // Number: Must be a positive number without $ symbol
+            "take_profit": 201.65 // Number: Must be a positive number without $ symbol
+        }},
+        "position_size": 0.35,    // Number: Must be a decimal between 0 and 1
+        "trade_type": "DAY"       // String: Must be exactly "DAY" or "SWING"
+    }}
 
-    Template:
-    {json.dumps(LLM_RESPONSE_TEMPLATE, indent=4)}
+    DO NOT:
+    - Add any text outside the JSON
+    - Add comments or currency symbols
+    - Modify the JSON structure or field names
+    - Change value cases (e.g., "Swing" vs "SWING")
 
     TRADING RULES:
     1. Base your analysis on quantitative metrics and technical indicators
@@ -144,62 +445,27 @@ def get_llm_response(
     6. Account for trading session and time of day
     7. Factor in volume profile and liquidity
 
-    CONFIDENCE LEVELS:
-    - 0.8-1.0: Strong statistical significance, clear technical setup, high volume confirmation
-    - 0.6-0.79: Good technical setup with some confirmation
-    - 0.4-0.59: Mixed signals, moderate confidence
-    - 0.2-0.39: Weak signals, low confidence
-    - 0.0-0.19: Very weak signals, minimal confidence
+    POSITION SIZING CONSIDERATIONS:
+    - Position size should be determined by your confidence in the trade and current market conditions
+    - Consider the current portfolio value and existing positions
+    - Factor in market volatility and liquidity
+    - Ensure position size aligns with your confidence level
+    - Consider risk management and portfolio diversification
+    - Account for the trade type (day vs swing)
 
-    DO NOT:
-    - Add any text before or after the JSON
-    - Use markdown formatting
-    - Include code blocks
-    - Add any comments
-    - Use currency symbols
-    - Add any newlines outside the JSON structure
-    - Ignore quantitative metrics
-    - Modify the JSON structure in any way
-    - Add or remove any fields
-    - Change any field names
-    - Omit any required fields
-    - Change the case of any values (e.g., "Swing" instead of "swing")
-
-    The response must start with {{ and end with }}."""
+    {stat_info}
+    """
 
     if USE_OLLAMA:
         # Get response from Ollama
-
         response_text = query_ollama(prompt)
         if not response_text:
             logger.error("No response from Ollama")
             return None
 
         analysis = json.loads(response_text)
-
-        # Validate required fields from LLM_RESPONSE_TEMPLATE
-        required_fields = LLM_RESPONSE_TEMPLATE.keys()
-        for field in required_fields:
-            if field not in analysis:
-                logger.error(f"Missing required field: {field}")
-                return None
-
-        # Validate specific values
-        if analysis["recommendation"] not in ["BUY", "SELL", "HOLD"]:
-            logger.error(f"Invalid recommendation: {analysis['recommendation']}")
-            return None
-
-        if analysis["trade_type"] not in ["day", "swing"]:
-            logger.error(f"Invalid trade type: {analysis['trade_type']}")
-            return None
-
-        if not 0 < analysis["position_size"] <= 1:
-            logger.error(f"Invalid position size: {analysis['position_size']}")
-            return None
-
-        if "stop_loss" not in analysis["price_targets"] or "take_profit" not in analysis["price_targets"]:
-            logger.error("Missing required price targets")
-            return None
+        analysis = prompt_validation_and_formatting(analysis)
+        logger.info(analysis)
 
         return analysis
     else:
@@ -218,187 +484,52 @@ def get_llm_response(
         return analysis
 
 
-def get_trading_analysis(prompt: str) -> Optional[Dict[str, Any]]:
-    """Get trading analysis from LLM based on a formatted prompt.
-
-    Sends a prompt to the LLM and processes its response into a structured trading
-    analysis. Validates the response format and required fields.
+def prompt_validation_and_formatting(analysis: Dict[str, Any]) -> Optional[str]:
+    """Validate and format the prompt for the LLM.
 
     Args:
-        prompt: Formatted string containing market data and analysis request.
+        prompt: The user prompt containing market data
 
     Returns:
-        Optional[Dict[str, Any]]: Dictionary containing validated trading analysis
-            with recommendation, reasoning, price targets, position size, and
-            trade type. Returns None if there's an error.
-
-    Raises:
-        ValueError: If the prompt is invalid or the LLM response is malformed.
+        Optional[str]: The formatted prompt or None if there's an error
     """
-    # Extract the analysis date from the prompt
-    date_match = re.search(r"Trading Analysis \((\d{4}-\d{2}-\d{2})\)", prompt)
-    if not date_match:
-        raise ValueError("Could not find analysis date in prompt")
-
-    analysis_date = date_match.group(1)
-
-    system_prompt = """You are an expert trading analyst. Your response must be ONLY a valid JSON object with no additional text before or after. The JSON must include ALL of these required fields:
-        {
-            "recommendation": "BUY/SELL/HOLD",  // REQUIRED: Must be one of these exact values
-            "confidence": 0.85,  // REQUIRED: Decimal between 0 and 1 representing your confidence in the recommendation
-            "reasoning": "<reasoning>",  // REQUIRED: Single string with technical analysis reasoning
-            "price_targets": {  // REQUIRED: Object with these exact fields
-                "stop_loss": "150.25",  // REQUIRED: String with price. For SELL orders, must be HIGHER than current price. For BUY orders, must be LOWER than current price.
-                "take_profit": "165.50"  // REQUIRED: String with price. For SELL orders, must be LOWER than current price. For BUY orders, must be HIGHER than current price.
-            },
-            "position_size": 0.01,  // REQUIRED: Decimal between 0 and 1
-            "trade_type": "day/swing"  // REQUIRED: Must be "day" or "swing"
-        }
-        
-        IMPORTANT PRICE RULES:
-        1. For SELL orders (when you want to sell high and buy back low):
-           - Current price is your entry (selling) price
-           - stop_loss must be HIGHER than current price (to buy back at a higher price if wrong)
-           - take_profit must be LOWER than current price (to buy back at a lower price if right)
-           - Example: If current price is $100, valid levels would be stop_loss=$110, take_profit=$90
-        
-        2. For BUY orders (when you want to buy low and sell high):
-           - Current price is your entry (buying) price
-           - stop_loss must be LOWER than current price (to sell at a lower price if wrong)
-           - take_profit must be HIGHER than current price (to sell at a higher price if right)
-           - Example: If current price is $100, valid levels would be stop_loss=$90, take_profit=$110
-        
-        Use the ATR-based levels or support/resistance levels provided in the prompt.
-        
-        DO NOT include any explanatory text before or after the JSON. Return ONLY the JSON object.
-        ALL fields are required and must match the exact format shown above."""
-
-    if USE_OLLAMA:
-        # Get response from Ollama
-        response_text = query_ollama(prompt, system_prompt)
-        if not response_text:
-            raise ValueError("No response from Ollama")
-
-        # Parse the response
-        analysis = json.loads(response_text)
-    else:
-        # Get response from OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=500,
-        )
-
-        if not response or not response.choices:
-            raise ValueError("No response from LLM")
-
-        # Log the raw response
-        raw_response = response.choices[0].message.content.strip()
-        logger.debug("Raw LLM response:\n%s", raw_response)
-
-        # Parse the response
-        analysis = json.loads(raw_response)
-
-    # Validate required fields
-    required_fields = {
-        "recommendation": str,
-        "confidence": (int, float),
-        "reasoning": str,
-        "price_targets": dict,
-        "position_size": (int, float),
-        "trade_type": str,
-    }
-
-    missing_fields = []
-    for field, field_type in required_fields.items():
+    # Validate required fields from LLM_EXAMPLE_TEMPLATE
+    required_fields = LLM_EXAMPLE_TEMPLATE.keys()
+    for field in required_fields:
         if field not in analysis:
-            missing_fields.append(field)
-        elif not isinstance(analysis[field], field_type):
-            raise ValueError(f"Field '{field}' has incorrect type. Expected {field_type}, got {type(analysis[field])}")
+            logger.error(f"Missing required field: {field}")
+            return None
 
-    if missing_fields:
-        raise ValueError(f"Missing required fields in LLM response: {', '.join(missing_fields)}")
+    # format if necessary
+    # remove $ from price targets
+    analysis["price_targets"]["take_profit"] = float(str(analysis["price_targets"]["take_profit"]).replace("$", ""))
+    analysis["price_targets"]["stop_loss"] = float(str(analysis["price_targets"]["stop_loss"]).replace("$", ""))
 
-    # Validate recommendation value
+    # remove % from position size
+    analysis["position_size"] = float(str(analysis["position_size"]).replace("%", ""))
+
+    # fix capitalization
+    analysis["recommendation"] = analysis["recommendation"].upper()
+    analysis["trade_type"] = analysis["trade_type"].upper()
+
+    # Validate specific values
     if analysis["recommendation"] not in ["BUY", "SELL", "HOLD"]:
-        raise ValueError(f"Invalid recommendation value: {analysis['recommendation']}. Must be one of: BUY, SELL, HOLD")
+        logger.error(f"Invalid recommendation: {analysis['recommendation']}")
+        return None
 
-    # Validate trade type
-    if analysis["trade_type"] not in ["day", "swing"]:
-        raise ValueError(f"Invalid trade type: {analysis['trade_type']}. Must be one of: day, swing")
+    if analysis["trade_type"] not in ["DAY", "SWING"]:
+        logger.error(f"Invalid trade type: {analysis['trade_type']}")
+        return None
 
-    # Validate price targets
-    if "stop_loss" not in analysis["price_targets"] or "take_profit" not in analysis["price_targets"]:
-        raise ValueError("Missing required fields in price_targets: stop_loss and/or take_profit")
-
-    # Validate position size
     if not 0 < analysis["position_size"] <= 1:
-        raise ValueError(f"Invalid position size: {analysis['position_size']}. Must be between 0 and 1")
+        logger.error(f"Invalid position size: {analysis['position_size']}. Must be between 0 and 1")
+        return None
 
-    # Add date to analysis
-    analysis["date"] = analysis_date
+    if "stop_loss" not in analysis["price_targets"] or "take_profit" not in analysis["price_targets"]:
+        logger.error("Missing required price targets")
+        return None
 
     return analysis
-
-
-def format_analysis_for_display(analysis: Dict[str, Any]) -> str:
-    """Format the trading analysis into a human-readable string.
-
-    Converts the structured analysis dictionary into a formatted string with
-    sections for recommendation, reasoning, price targets, position size,
-    and trade type.
-
-    Args:
-        analysis: Dictionary containing trading analysis and recommendations.
-
-    Returns:
-        str: Formatted string representation of the analysis, or "No analysis
-            available" if the input is None.
-    """
-    if not analysis:
-        return "No analysis available"
-
-    lines = [
-        f"Trading Analysis ({analysis.get('date', 'N/A')})",
-        "=" * 40,
-    ]
-
-    # Add recommendation
-    if "recommendation" in analysis:
-        lines.extend([f"Recommendation: {analysis['recommendation']}", ""])
-
-    # Add reasoning if available
-    if "reasoning" in analysis:
-        lines.extend(["Reasoning:", analysis["reasoning"], ""])
-
-    # Add price targets
-    if "price_targets" in analysis:
-        lines.extend(
-            [
-                "Price Targets:",
-                f"- Stop Loss: ${analysis['price_targets'].get('stop_loss', 'N/A')}",
-                f"- Take Profit: ${analysis['price_targets'].get('take_profit', 'N/A')}",
-                "",
-            ]
-        )
-
-    # Add position size
-    if "position_size" in analysis:
-        try:
-            position_size = float(analysis["position_size"])
-            lines.append(f"Position Size: {position_size*100:.1f}%")
-        except (ValueError, TypeError):
-            lines.append(f"Position Size: {analysis['position_size']}")
-
-    # Add trade type
-    if "trade_type" in analysis:
-        lines.append(f"Trade Type: {analysis['trade_type'].title()}")
-
-    return "\n".join(lines)
 
 
 def save_analysis(analysis: Dict[str, Any], symbol: str) -> None:
@@ -485,5 +616,4 @@ if __name__ == "__main__":
     # Get and display the analysis
     analysis = get_llm_response(df)
     if analysis:
-        logger.info(format_analysis_for_display(analysis))
         save_analysis(analysis, "AAPL")
