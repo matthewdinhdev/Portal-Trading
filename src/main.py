@@ -1,21 +1,23 @@
+import argparse
 import os
 import time
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import pytz
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import (
     OrderRequest,
     StopLossRequest,
     TakeProfitRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce
 from dotenv import load_dotenv
+
 import discord_bot
 from logger import setup_logger
-from typing import Dict, List, Optional, Any
-import argparse
-import pytz
-from utility import TRADING_STRATEGY, get_historical_data, analyze_symbol
 from trading_enums import TradingEnvironment
+from utility import TRADING_STRATEGY, analyze_symbol, get_historical_data
 
 # Set up logger
 logger = setup_logger("paper_trading.log")
