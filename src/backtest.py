@@ -1,38 +1,19 @@
+import os
 import backtrader as bt
 import pandas as pd
-from datetime import datetime, timedelta, timezone
-import os
+from datetime import datetime, timedelta
 import json
 from typing import Dict, Optional, Any
-import time
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
-from dotenv import load_dotenv
-
 from logger import setup_logger
-from strategies import calculate_indicators
-from llm import get_llm_response
+from utility import TRADING_STRATEGY, get_historical_data, analyze_symbol
+from trading_enums import TradingEnvironment
 
 # Set up logger
 logger = setup_logger("backtest.log")
 
-# Load environment variables
-load_dotenv()
-
-# Initialize Alpaca clients
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-
-if not API_KEY or not SECRET_KEY:
-    raise ValueError("Please set ALPACA_API_KEY and ALPACA_SECRET_KEY in your .env file")
-
-data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-
-# Define test period
-TEST_TIMEFRAME = TimeFrame.Day
-TEST_START_DATE = datetime(2016, 1, 4, tzinfo=timezone.utc)  # First trading day of 2016
-TEST_END_DATE = datetime(2016, 6, 1, tzinfo=timezone.utc)
+# Constants
+TEST_START_DATE = datetime(2017, 1, 4)
+TEST_END_DATE = datetime(2018, 1, 4)
 
 
 class Trade:
@@ -134,13 +115,40 @@ class Trade:
 class LLMStrategy(bt.Strategy):
     """Strategy that uses LLM for trading decisions."""
 
-    params = (("lookback_periods", 60),)
+    params = (
+        (
+            "lookback_periods",
+            TRADING_STRATEGY["lookback_periods"],
+        ),
+    )
 
     def __init__(self):
         """Initialize strategy parameters."""
         self.order = None
         self.current_trade = None
         self.trades = []  # List to store all trades
+        self.data_window = None  # Will be initialized in start
+
+    def start(self):
+        """Called once before the strategy starts running."""
+        # Initialize data window with all historical data
+        logger.info("Getting historical data for data window...")
+
+        # Calculate lookback start date (add buffer for weekends and holidays)
+        logger.info(f" . Test start date: {TEST_START_DATE}")
+        lookback_start = TEST_START_DATE - timedelta(days=self.p.lookback_periods)
+        logger.info(f" . Lookback start date: {lookback_start}")
+
+        # Get historical data directly - only up to test start date
+        self.data_window = get_historical_data(
+            symbol=self.data._name,
+            start_date=lookback_start,
+            end_date=TEST_START_DATE,  # Only get data up to test start
+        )
+
+        if self.data_window.empty:
+            logger.error("No historical data available for data window")
+            return
 
     def notify_order(self, order):
         """Handle order notifications.
@@ -195,6 +203,12 @@ class LLMStrategy(bt.Strategy):
             analysis: Dictionary containing trading analysis and recommendations
         """
         logger.info(" . Executing trade")
+
+        # check if recommendation is HOLD
+        if analysis["recommendation"] == "HOLD":
+            logger.info("   . Reccomendation is HOLD. Skipping trade.")
+            return
+
         # Get position size as percentage from LLM analysis
         position_size_pct = analysis.get("position_size")
         available_cash = self.broker.getcash()
@@ -249,11 +263,6 @@ class LLMStrategy(bt.Strategy):
         current_date = self.data.datetime.datetime(0)
         logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # Check if we have enough data points
-        if len(self.data) < self.p.lookback_periods:
-            logger.info(f" . Waiting for more data... Current: {len(self.data)}, Required: {self.p.lookback_periods}")
-            return
-
         # Skip if we have a pending order
         if self.order:
             logger.info(" . Waiting for pending order to complete")
@@ -264,122 +273,44 @@ class LLMStrategy(bt.Strategy):
             logger.info(f" . Position already open: Size={self.position.size}, Price=${self.data.close[0]:.2f}")
             return
 
-        # Get current data
-        current_data = self.get_current_data()
+        # Update data window with new data point
+        new_data = pd.DataFrame(
+            {
+                "datetime": [current_date],
+                "open": [self.data.open[0]],
+                "high": [self.data.high[0]],
+                "low": [self.data.low[0]],
+                "close": [self.data.close[0]],
+                "volume": [self.data.volume[0]],
+            }
+        )
+        new_data.set_index("datetime", inplace=True)
 
-        # Get LLM analysis
-        analysis = self.get_llm_analysis(current_data)
-        if not analysis:
+        # Append new data and keep only the lookback period
+        self.data_window = pd.concat([self.data_window, new_data])
+        if len(self.data_window) > self.p.lookback_periods:
+            self.data_window = self.data_window.iloc[-self.p.lookback_periods :]
+
+        # verify that data_window has enough data
+        num_days_six_months = 126
+        if len(self.data_window) < num_days_six_months:
+            logger.error(
+                f"Not enough data to make a decision. Need {num_days_six_months} days, have {len(self.data_window)}"
+            )
             return
 
-        # Process trade if recommendation is BUY or SELL
-        if analysis["recommendation"] in ["BUY", "SELL"]:
-            self.execute_trade(analysis)
+        # Get LLM analysis using utility function
+        result = analyze_symbol(
+            symbol=self.data._name,
+            data=self.data_window,
+            env=TradingEnvironment.BACKTEST,
+            save_analysis=False,
+        )
 
-    def get_current_data(self):
-        """Get current market data for LLM analysis.
+        if not result:
+            raise Exception(f"No analysis found for {self.data._name}")
 
-        Returns:
-            DataFrame containing current market data and indicators
-        """
-        # Create DataFrame with current market data
-        df = pd.DataFrame()
-        df["datetime"] = [self.data.datetime.datetime(i) for i in range(-self.p.lookback_periods, 1)]
-        df["open"] = [self.data.open[i] for i in range(-self.p.lookback_periods, 1)]
-        df["high"] = [self.data.high[i] for i in range(-self.p.lookback_periods, 1)]
-        df["low"] = [self.data.low[i] for i in range(-self.p.lookback_periods, 1)]
-        df["close"] = [self.data.close[i] for i in range(-self.p.lookback_periods, 1)]
-        df["volume"] = [self.data.volume[i] for i in range(-self.p.lookback_periods, 1)]
-
-        # Set datetime as index
-        df.set_index("datetime", inplace=True)
-
-        # Calculate indicators using the imported function
-        df = calculate_indicators(df)
-
-        return df
-
-    def get_llm_analysis(self, data):
-        """Get trading analysis from LLM.
-
-        Args:
-            data: Market data for analysis
-
-        Returns:
-            Dictionary containing trading analysis or None if error
-        """
-        logger.info(" . Getting LLM analysis")
-
-        # Create account information dictionary with account metrics
-        account_info = {
-            "portfolio_value": self.broker.getvalue(),
-            "cash": self.broker.getcash(),
-            "buying_power": self.broker.getcash(),  # In backtest, buying power equals cash
-            "daytrade_count": 0,  # Not tracked in backtest
-            "pattern_day_trader": False,  # Not applicable in backtest
-            "shorting_enabled": True,  # Always enabled in backtest
-            "status": "ACTIVE",  # Always active in backtest
-        }
-
-        analysis = None
-        num_retries = 0
-        RETRY_LIMIT = 3
-        while num_retries < RETRY_LIMIT and not analysis:
-            try:
-                analysis = get_llm_response(data, account_info)
-                if analysis:
-                    break
-            except Exception as e:
-                logger.error(f"Error getting LLM analysis (attempt {num_retries + 1}/{RETRY_LIMIT}): {str(e)}")
-                num_retries += 1
-                if num_retries < RETRY_LIMIT:
-                    time.sleep(1)  # Wait before retrying
-
-        if not analysis:
-            logger.error("Failed to get LLM analysis after all retries")
-            return None
-
-        return analysis
-
-
-def get_historical_data(symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Get historical data for a symbol from Alpaca.
-
-    Args:
-        symbol: Trading symbol (e.g., 'AAPL')
-        start_date: Start date for data
-        end_date: End date for data
-
-    Returns:
-        DataFrame containing historical market data
-
-    Raises:
-        ValueError: If no data is available for the specified date range
-    """
-    logger.info(" . Fetching historical data")
-    # Convert to UTC if not already
-    if start_date.tzinfo is None:
-        start_date = start_date.replace(tzinfo=timezone.utc)
-    if end_date.tzinfo is None:
-        end_date = end_date.replace(tzinfo=timezone.utc)
-
-    logger.info(f"Requesting data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-
-    request_params = StockBarsRequest(
-        symbol_or_symbols=symbol, timeframe=TEST_TIMEFRAME, start=start_date, end=end_date
-    )
-
-    bars = data_client.get_stock_bars(request_params)
-    df = bars.df
-
-    # Reset multi-index to single index
-    if isinstance(df.index, pd.MultiIndex):
-        df = df.reset_index(level=0, drop=True)
-
-    if df.empty:
-        raise ValueError("No historical data available for the specified date range")
-
-    return df
+        self.execute_trade(result["analysis"])
 
 
 def run_backtest(
@@ -399,13 +330,21 @@ def run_backtest(
         f"Running backtest for {symbol} from {TEST_START_DATE.strftime('%Y-%m-%d')} to {TEST_END_DATE.strftime('%Y-%m-%d')}"
     )
 
-    # Calculate lookback start date
-    lookback_start = TEST_START_DATE - timedelta(days=30)  # Add 30 days for indicators
-
-    df = get_historical_data(symbol, lookback_start, TEST_END_DATE)
+    df = get_historical_data(symbol, TEST_START_DATE, TEST_END_DATE)
 
     if df.empty:
         raise ValueError("No historical data available for the specified date range")
+
+    logger.info(f"Loaded {len(df)} data points from {df.index[0]} to {df.index[-1]}")
+
+    # Validate DataFrame format
+    required_columns = ["open", "high", "low", "close", "volume"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"DataFrame missing required columns: {missing_columns}")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("DataFrame index must be a DatetimeIndex")
 
     # Create a cerebro entity
     cerebro = bt.Cerebro()
@@ -420,6 +359,9 @@ def run_backtest(
         close="close",
         volume="volume",
         openinterest=-1,
+        name=symbol,  # Explicitly set the symbol name
+        timeframe=bt.TimeFrame.Days,  # Explicitly set timeframe
+        compression=1,  # No compression
     )
 
     # Add the Data Feed to Cerebro

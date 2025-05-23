@@ -20,8 +20,12 @@ def calculate_price_indicators(df: pd.DataFrame) -> pd.DataFrame:
         pd.DataFrame: DataFrame with added 'returns' and 'log_returns' columns.
     """
     df = df.copy()
-    df["returns"] = df["close"].pct_change()
+    # Calculate returns using shift to ensure proper alignment
+    df["returns"] = df["close"].pct_change(periods=1)
     df["log_returns"] = np.log(df["close"] / df["close"].shift(1))
+    # Fill NaN values with 0 for the first row
+    df["returns"] = df["returns"].fillna(0)
+    df["log_returns"] = df["log_returns"].fillna(0)
     return df
 
 
