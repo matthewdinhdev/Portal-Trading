@@ -189,25 +189,46 @@ def get_current_positions() -> List[Dict[str, Any]]:
     ]
 
 
-def execute_trade(
-    symbol: str,
-    side: str,
-    qty: float,
-    stop_loss: float,
-    take_profit: float,
-) -> Optional[Dict[str, Any]]:
-    """Execute a trade with stop loss and take profit orders."""
-    logger.info(f" . Executing {side.upper()} trade for {symbol}")
-    logger.info(f"   . Quantity: {qty}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
+def execute_trade(analysis: Dict[str, Any], account_info: Dict[str, Any]) -> None:
+    """Execute a trade based on analysis and account information."""
+    logger.info(f"Executing trade for {analysis['symbol']}")
+
+    # Send to Discord for all recommendations
+    if discord_bot.send_to_discord(analysis):
+        logger.info(" . Successfully sent to Discord")
+
+    # Only execute trades for BUY/SELL recommendations
+    if analysis["recommendation"] == "HOLD":
+        logger.info(f" . HOLD recommendation for {analysis['symbol']} - no trade executed")
+        return
+
+    # Get price targets from analysis
+    price_targets = analysis["price_targets"]
+    stop_loss = price_targets["stop_loss"]
+    take_profit = price_targets["take_profit"]
+
+    # Calculate quantity based on position size percentage
+    position_size = analysis["position_size"]
+    if isinstance(position_size, str):
+        position_size_pct = float(position_size.strip("%")) / 100
+    else:
+        position_size_pct = float(position_size) / 100
+    account_value = float(account_info["equity"])
+    position_value = account_value * position_size_pct
+    qty = int(position_value / analysis["current_price"])  # Round down to whole shares
+
+    # If quantity is 0, set to 1 share
+    if qty == 0:
+        qty = 1
 
     # Setup order request
     stop_loss = round(float(stop_loss), 2)
     take_profit = round(float(take_profit), 2)
     time_in_force = TimeInForce.GTC
     order_request = OrderRequest(
-        symbol=symbol,
+        symbol=analysis["symbol"],
         qty=qty,
-        side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
+        side=OrderSide.BUY if analysis["recommendation"].lower() == "buy" else OrderSide.SELL,
         type="market",
         time_in_force=time_in_force,
         order_class="bracket",
@@ -227,8 +248,8 @@ def execute_trade(
 
     # Return order details
     return {
-        "symbol": symbol,
-        "side": side,
+        "symbol": analysis["symbol"],
+        "side": analysis["recommendation"],
         "quantity": qty,
         "status": order.status,
         "filled_at": order.filled_at.isoformat() if order.filled_at else None,
@@ -236,48 +257,6 @@ def execute_trade(
         "environment": "PAPER" if env == TradingEnvironment.PAPER else "LIVE",
         "price_targets": {"stop_loss": stop_loss, "take_profit": take_profit},
     }
-
-
-def execute_trading_decision(analysis: Dict[str, Any], account_info: Dict[str, Any]) -> None:
-    """Execute trading decision based on analysis and account information."""
-    logger.info(f"Executing trading decision for {analysis['symbol']}")
-
-    # Get price targets from analysis
-    price_targets = analysis["price_targets"]
-    stop_loss = price_targets["stop_loss"]
-    take_profit = price_targets["take_profit"]
-
-    # Send to Discord for all recommendations
-    if discord_bot.send_to_discord(analysis):
-        logger.info(" . Successfully sent to Discord")
-
-    # Only execute trades for BUY/SELL recommendations
-    if analysis["recommendation"] == "HOLD":
-        logger.info(f" . HOLD recommendation for {analysis['symbol']} - no trade executed")
-        return
-
-    # Calculate quantity based on position size percentage
-    position_size = analysis["position_size"]
-    if isinstance(position_size, str):
-        position_size_pct = float(position_size.strip("%")) / 100
-    else:
-        position_size_pct = float(position_size) / 100
-    account_value = float(account_info["equity"])
-    position_value = account_value * position_size_pct
-    qty = int(position_value / analysis["current_price"])  # Round down to whole shares
-
-    # If quantity is 0, set to 1 share
-    if qty == 0:
-        qty = 1
-
-    # Execute the trade
-    execute_trade(
-        symbol=analysis["symbol"],
-        side=analysis["recommendation"],
-        qty=qty,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-    )
 
 
 def display_position_updates() -> None:
@@ -335,7 +314,7 @@ def main() -> None:
             result = analyze_symbol(symbol=symbol, data=df, env=env, save_analysis=not args.dont_save_analysis)
 
             if result:
-                execute_trading_decision(result["analysis"], account_info)
+                execute_trade(result["analysis"], account_info)
 
         # Show position updates every 20 minutes
         wait_seconds = 1200
