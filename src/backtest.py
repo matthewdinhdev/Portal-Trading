@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import backtrader as bt
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import pandas as pd
 
 from logger import setup_logger
@@ -466,6 +468,79 @@ def run_backtest(
     }
 
 
+def plot_trades(df: pd.DataFrame, trades: list, symbol: str) -> None:
+    """Plot price action and trades.
+
+    Args:
+        df: DataFrame containing price data
+        trades: List of trade dictionaries
+        symbol: Trading symbol
+    """
+    plt.figure(figsize=(15, 8))
+
+    # Plot price action
+    plt.plot(df.index, df["close"], label="Price", color="gray", alpha=0.5)
+
+    # Plot trades
+    for trade in trades:
+        entry_date = pd.to_datetime(trade["entry_date"])
+        exit_date = pd.to_datetime(trade["exit_date"])
+
+        # Plot entry point
+        plt.scatter(
+            entry_date,
+            trade["entry_price"],
+            color="green" if trade["type"] == "BUY" else "red",
+            marker="^" if trade["type"] == "BUY" else "v",
+            s=100,
+            label=f"{trade['type']} Entry" if trade == trades[0] else "",
+        )
+
+        # Plot exit point
+        plt.scatter(
+            exit_date,
+            trade["exit_price"],
+            color="blue" if trade["status"] == "WIN" else "black",
+            marker="o",
+            s=100,
+            label=f"{trade['status']} Exit" if trade == trades[0] else "",
+        )
+
+        # Draw line between entry and exit
+        plt.plot(
+            [entry_date, exit_date],
+            [trade["entry_price"], trade["exit_price"]],
+            color="green" if trade["status"] == "WIN" else "red",
+            alpha=0.3,
+        )
+
+        # Add stop loss and take profit levels
+        plt.plot([entry_date, exit_date], [trade["stop_loss"], trade["stop_loss"]], "r--", alpha=0.3)
+        plt.plot([entry_date, exit_date], [trade["take_profit"], trade["take_profit"]], "g--", alpha=0.3)
+
+    # Customize plot
+    plt.title(f"{symbol} Trading History")
+    plt.xlabel("Date")
+    plt.ylabel("Price")
+    plt.grid(True, alpha=0.3)
+
+    # Format x-axis dates
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    plt.gcf().autofmt_xdate()
+
+    # Add legend
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys())
+
+    # Save plot
+    output_dir = "backtest_results"
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plt.savefig(os.path.join(output_dir, f"trade_plot_{timestamp}.png"))
+    plt.close()
+
+
 def main() -> None:
     """Run the backtest and save results."""
     logger.info("Starting backtest...")
@@ -515,6 +590,13 @@ def main() -> None:
             logger.info(f"P&L: ${trade['pnl']:.2f}")
             logger.info(f"Return: {trade['return_pct']:.2f}%")
             logger.info(f"Exit Reason: {trade['exit_reason']}")
+
+        # Get historical data for plotting
+        df = get_historical_data("SPY", TEST_START_DATE, TEST_END_DATE)
+
+        # Plot trades
+        plot_trades(df, results["trades"], "SPY")
+        logger.info("\nTrade plot has been saved to backtest_results directory")
 
         # Save results to file
         output_dir = "backtest_results"
