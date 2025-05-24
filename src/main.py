@@ -17,7 +17,12 @@ from dotenv import load_dotenv
 import discord_bot
 from logger import setup_logger
 from trading_enums import TradingEnvironment
-from utility import TRADING_STRATEGY, analyze_symbol, get_historical_data
+from utility import (
+    TRADING_STRATEGY,
+    analyze_symbol,
+    calculate_position_size,
+    get_historical_data,
+)
 
 # Set up logger
 logger = setup_logger("paper_trading.log")
@@ -209,19 +214,12 @@ def execute_trade(analysis: Dict[str, Any], account_info: Dict[str, Any]) -> Non
     stop_loss = price_targets["stop_loss"]
     take_profit = price_targets["take_profit"]
 
-    # Calculate quantity based on position size percentage
-    position_size = analysis["position_size"]
-    if isinstance(position_size, str):
-        position_size_pct = float(position_size.strip("%")) / 100
-    else:
-        position_size_pct = float(position_size) / 100
-    account_value = float(account_info["equity"])
-    position_value = account_value * position_size_pct
-    qty = int(position_value / analysis["current_price"])  # Round down to whole shares
-
-    # If quantity is 0, set to 1 share
-    if qty == 0:
-        qty = 1
+    # Calculate quantity using utility function
+    qty = calculate_position_size(
+        confidence=analysis["confidence"],
+        available_cash=float(account_info["cash"]),
+        current_price=analysis["current_price"],
+    )
 
     # Setup order request
     stop_loss = round(float(stop_loss), 2)

@@ -1,9 +1,10 @@
+import logging
 import os
+from datetime import datetime
+from typing import Any, Dict
+
 import requests
 from dotenv import load_dotenv
-from datetime import datetime
-import logging
-from typing import Dict, Any
 
 # Get logger from the calling module
 logger = logging.getLogger()
@@ -58,11 +59,6 @@ def send_to_discord(analysis: Dict[str, Any]) -> bool:
                         {
                             "name": "📊 Recommendation",
                             "value": f"```{analysis['recommendation']} (Confidence: {analysis['confidence']*100:.1f}%)```",
-                            "inline": True,
-                        },
-                        {
-                            "name": "💰 Position Size",
-                            "value": f"```{analysis['position_size']*100:.1f}%```",
                             "inline": True,
                         },
                         {

@@ -1,14 +1,16 @@
-import pandas as pd
+import logging
+import os
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from typing import Dict, Optional, Any
-import strategies
-import llm
-import os
 from dotenv import load_dotenv
-import logging
+
+import llm
+import strategies
 from trading_enums import TradingEnvironment
 
 # Load environment variables
@@ -114,3 +116,23 @@ def analyze_symbol(
         "symbol": symbol,
         "analysis": analysis,
     }
+
+
+def calculate_position_size(confidence: float, available_cash: float, current_price: float) -> int:
+    """Calculate the position size in number of shares based confidence level
+
+    Args:
+        confidence: Confidence level of the trade
+        available_cash: Total available cash
+        current_price: Current price of the asset
+
+    Returns:
+        int: Number of shares to trade (minimum 1 share)
+    """
+    # Calculate position value and number of shares
+    POSITION_SIZE_PCT = confidence
+    position_value = available_cash * POSITION_SIZE_PCT
+    shares = int(position_value / current_price)
+
+    # Ensure minimum position size of 1 share
+    return max(1, shares)

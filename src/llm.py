@@ -1,10 +1,12 @@
-import os
-import requests
 import json
-from datetime import datetime
 import logging
-from typing import Dict, List, Optional, Any
+import os
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import pandas as pd
+import requests
+
 from trading_enums import TradingEnvironment
 
 # This logger will inherit all settings from the root logger
@@ -20,6 +22,7 @@ class LLMAnalyzer:
     _trend_strong = 0.1
     _trend_moderate = 0.05
     _model_backtest = "deepseek-llm:7b"
+    # _model_backtest = "deepseek-r1:14b"
     _model_live = "deepseek-r1:14b"
     _historical_window = 48
 
@@ -145,7 +148,6 @@ class LLMAnalyzer:
         response.raise_for_status()
 
         raw_response = response.json()["response"]
-        logger.debug(f"Raw response: {raw_response}")
 
         cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
         return cleaned_response
@@ -162,7 +164,7 @@ class LLMAnalyzer:
         # generate prompt
         prompt = f"""
         CRITICAL INSTRUCTIONS:
-        1. You are a quantitative trading algorithm
+        1. You are a quantitative trading algorithm. Analyze the market data and generate a trading recommendation.
         2. Your response MUST be ONLY the JSON object below
         3. The response must start with {{ and end with }}
         4. Use this EXACT structure:
@@ -171,23 +173,50 @@ class LLMAnalyzer:
             "confidence": "0.0|0.1|0.2|0.3|0.4|0.5|0.6|0.7|0.8|0.9|1.0",
             "reasoning": "string",
             "price_targets": {{
-                "stop_loss": "positive_number",
-                "take_profit": "positive_number"
-            }},
-            "position_size": "0.0|0.1|0.2|0.3|0.4|0.5|0.6|0.7|0.8|0.9|1.0"
+                "stop_loss": "positive_number (for BUY: below entry, for SELL: above entry)",
+                "take_profit": "positive_number (for BUY: above entry, for SELL: below entry)"
+            }}
         }}
         5. DO NOT include any thinking process or tags like <thinking> or </thinking>. IT MUST FOLLOW THE EXACT STRUCTURE ABOVE.
 
-        TRADING RULES:
-        1. Default to HOLD unless there's clear evidence for BUY/SELL
-        2. Require multiple confirming signals for BUY/SELL:
-           - Technical indicators alignment
-           - Volume confirmation
-           - Clear support/resistance
-           - Strong trend
-           - Favorable risk/reward
-        3. Position size should reflect confidence level
-        4. Consider market conditions and volatility
+        TRADING GUIDELINES:
+        1. Analyze the provided market data thoroughly, including:
+           - Price action and trends
+           - Volume patterns
+           - Technical indicators
+           - Market context and conditions
+           - Support and resistance levels
+           - Volatility patterns
+
+        2. Make trading decisions based on your analysis:
+           - BUY when you identify ANY bullish opportunity with 10%+ profit potential
+           - SELL when you identify ANY bearish opportunity with 10%+ profit potential
+           - HOLD only when market conditions are extremely unfavorable or unpredictable
+           - Take trades more frequently, even with moderate confidence
+           - Look for momentum and trend continuation opportunities
+           - Don't be afraid to trade against the trend if you see a reversal opportunity
+
+        3. Size your position based on:
+           - Your confidence in the trade
+           - Risk/reward ratio (aim for at least 1.5:1)
+           - Market volatility
+           - Overall market conditions
+
+        4. Set price targets that:
+           - For BUY trades:
+             * Stop loss must be BELOW entry price
+             * Take profit must be ABOVE entry price
+             * Target at least 10% profit potential
+             * Be more aggressive with take profit levels
+           - For SELL trades:
+             * Stop loss must be ABOVE entry price
+             * Take profit must be BELOW entry price
+             * Target at least 10% profit potential
+             * Be more aggressive with take profit levels
+           - Account for volatility
+           - Provide favorable risk/reward ratios (minimum 1.5:1)
+           - Consider support/resistance levels
+           - Set stop loss at logical support/resistance levels
 
         {stat_info}
         """
@@ -201,6 +230,7 @@ class LLMAnalyzer:
         analysis = self.load_analysis_to_json(response_text)
         analysis["current_price"] = df["close"].iloc[-1]
         analysis["symbol"] = df.name
+        logger.debug(f"Raw response: {analysis}")
         analysis = self.prompt_validation_and_formatting(analysis)
         logger.debug(f"LLM response: {analysis}")
 
@@ -228,7 +258,6 @@ class LLMAnalyzer:
             "confidence",
             "reasoning",
             "price_targets",
-            "position_size",
             "current_price",
         ]
         for field in required_fields:
@@ -241,17 +270,12 @@ class LLMAnalyzer:
         analysis["current_price"] = float(str(analysis["current_price"]).replace("$", ""))
 
         # format field values
-        analysis["position_size"] = float(str(analysis["position_size"]).replace("%", ""))
         analysis["price_targets"]["take_profit"] = float(str(analysis["price_targets"]["take_profit"]).replace("$", ""))
         analysis["price_targets"]["stop_loss"] = float(str(analysis["price_targets"]["stop_loss"]).replace("$", ""))
 
         # check if recommendation is valid
         if analysis["recommendation"] not in ["BUY", "SELL", "HOLD"]:
             raise ValueError(f"Invalid recommendation: {analysis['recommendation']}")
-
-        # check if position size is valid
-        if not 0 <= analysis["position_size"] <= 1:
-            raise ValueError(f"Invalid position size: {analysis['position_size']}. Must be between 0 and 1")
 
         # check if confidence is valid
         if not 0 <= analysis["confidence"] <= 1:
@@ -266,14 +290,14 @@ class LLMAnalyzer:
             analysis["recommendation"] == "BUY"
             and analysis["price_targets"]["stop_loss"] >= analysis["price_targets"]["take_profit"]
         ):
-            raise ValueError("Stop loss must be less than take profit")
+            raise ValueError("Stop loss must be less than take profit for a BUY trade")
 
         # check if stop loss is greater than take profit for SELL
         if (
             analysis["recommendation"] == "SELL"
             and analysis["price_targets"]["stop_loss"] <= analysis["price_targets"]["take_profit"]
         ):
-            raise ValueError("Stop loss must be greater than take profit")
+            raise ValueError("Stop loss must be greater than take profit for a SELL trade")
 
         return analysis
 

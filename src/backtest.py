@@ -1,19 +1,26 @@
+import json
 import os
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional
+
 import backtrader as bt
 import pandas as pd
-from datetime import datetime, timedelta
-import json
-from typing import Dict, Optional, Any
+
 from logger import setup_logger
-from utility import TRADING_STRATEGY, get_historical_data, analyze_symbol
 from trading_enums import TradingEnvironment
+from utility import (
+    TRADING_STRATEGY,
+    analyze_symbol,
+    calculate_position_size,
+    get_historical_data,
+)
 
 # Set up logger
 logger = setup_logger("backtest.log")
 
 # Constants
 TEST_START_DATE = datetime(2017, 1, 4)
-TEST_END_DATE = datetime(2018, 1, 4)
+TEST_END_DATE = datetime(2021, 1, 4)
 
 
 class Trade:
@@ -209,15 +216,11 @@ class LLMStrategy(bt.Strategy):
             logger.info("   . Reccomendation is HOLD. Skipping trade.")
             return
 
-        # Get position size as percentage from LLM analysis
-        position_size_pct = analysis.get("position_size")
-        available_cash = self.broker.getcash()
-        position_value = available_cash * position_size_pct
+        # Calculate position size using utility function
         current_price = self.data.close[0]
-
-        # Calculate number of shares based on position value
-        size = int(position_value / current_price)
-        size = 1 if size < 1 else size
+        size = calculate_position_size(
+            confidence=analysis["confidence"], available_cash=self.broker.getcash(), current_price=current_price
+        )
 
         # Set variables for the order
         entry_price = current_price
@@ -473,16 +476,16 @@ def main() -> None:
     if results:
         # Print results
         logger.info("\nBacktest Results:")
-        logger.info("=" * 50)
+        logger.info("==================================================")
         logger.info(f"Initial Value: ${results['initial_value']:,.2f}")
         logger.info(f"Final Value: ${results['final_value']:,.2f}")
         logger.info(f"Total Return: {results['total_return']*100:.2f}%")
         logger.info(f"Net P&L: ${results['net_pnl']:,.2f}")
         logger.info(f"Total Commission: ${results['total_commission']:,.2f}")
-
-        # Print trade summary
-        logger.info("\nTrade Summary:")
-        logger.info("=" * 50)
+        logger.info("")
+        logger.info("Trade Summary:")
+        logger.info("==================================================")
+        logger.info(f"Test Period: {TEST_START_DATE.strftime('%Y-%m-%d')} to {TEST_END_DATE.strftime('%Y-%m-%d')}")
         logger.info(f"Total Trades: {results['total_trades']}")
         logger.info(f"Winning Trades: {results['winning_trades']}")
         logger.info(f"Losing Trades: {results['losing_trades']}")
@@ -497,22 +500,21 @@ def main() -> None:
 
         # Print individual trades
         logger.info("\nIndividual Trades:")
-        logger.info("=" * 50)
+        logger.info("==================================================")
         for i, trade in enumerate(results["trades"], 1):
             logger.info(f"\nTrade #{i}:")
             logger.info(f"Trade Type: ({trade['type']})")
             logger.info(f"Entry Date: {trade['entry_date']}")
             logger.info(f"Exit Date: {trade['exit_date']}")
-            logger.info(f"Entry Price: ${trade['entry_price']:.2f}")
-            logger.info(f"Exit Price: ${trade['exit_price']:.2f}")
+            logger.info(f"Confidence: {trade['confidence']*100:.1f}%")
             logger.info(f"Size: {trade['size']}")
-            logger.info(f"P&L: ${trade['pnl']:.2f}")
-            logger.info(f"Return: {trade['return_pct']:.2f}%")
-            logger.info(f"Commission: ${trade['commission']:.2f}")
+            logger.info(f"Entry Price: ${trade['entry_price']:.2f}")
             logger.info(f"Stop Loss: ${trade['stop_loss']:.2f}")
             logger.info(f"Take Profit: ${trade['take_profit']:.2f}")
+            logger.info(f"Exit Price: ${trade['exit_price']:.2f}")
+            logger.info(f"P&L: ${trade['pnl']:.2f}")
+            logger.info(f"Return: {trade['return_pct']:.2f}%")
             logger.info(f"Exit Reason: {trade['exit_reason']}")
-            logger.info(f"Confidence: {trade['confidence']*100:.1f}%")
 
         # Save results to file
         output_dir = "backtest_results"
