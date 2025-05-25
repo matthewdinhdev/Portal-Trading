@@ -27,8 +27,8 @@ logging.getLogger("matplotlib").setLevel(logging.CRITICAL)
 
 # Constants
 TEST_START_DATE = datetime(2017, 1, 4)
-TEST_END_DATE = datetime(2017, 4, 4)
-# TEST_END_DATE = datetime(2021, 1, 4)
+# TEST_END_DATE = datetime(2017, 4, 4)
+TEST_END_DATE = datetime(2021, 1, 4)
 
 
 class Trade:

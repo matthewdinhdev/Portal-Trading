@@ -2,9 +2,8 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
-import pandas as pd
 import requests
 
 from trading_enums import TradingEnvironment
@@ -15,156 +14,12 @@ logger = logging.getLogger(__name__)
 
 class LLMAnalyzer:
     # Private class variables
-    _volatility_window = 20
-    _volatility_threshold = 1.0
-    _rsi_overbought = 70
-    _rsi_oversold = 30
-    _trend_strong = 0.1
-    _trend_moderate = 0.05
     _model_backtest = "deepseek-llm:7b"
-    # _model_backtest = "deepseek-r1:14b"
     _model_live = "deepseek-r1:14b"
-    _historical_window = 48
 
     def __init__(self, env: TradingEnvironment):
         """Initialize the LLM Analyzer."""
         self.env = env
-
-    def calculate_pivot_points(self, df: pd.DataFrame) -> Tuple[float, float, float, float, float, float, float]:
-        """Calculate pivot points and support/resistance levels.
-
-        Args:
-            df: DataFrame with OHLC data
-
-        Returns:
-            Tuple of (Pivot, R1, R2, R3, S1, S2, S3)
-        """
-        # Get previous day's data
-        prev_high = df["high"].iloc[-2]
-        prev_low = df["low"].iloc[-2]
-        prev_close = df["close"].iloc[-2]
-
-        # Calculate pivot point
-        pivot = (prev_high + prev_low + prev_close) / 3
-
-        # Calculate support and resistance levels
-        r1 = (2 * pivot) - prev_low
-        s1 = (2 * pivot) - prev_high
-        r2 = pivot + (prev_high - prev_low)
-        s2 = pivot - (prev_high - prev_low)
-        r3 = prev_high + 2 * (pivot - prev_low)
-        s3 = prev_low - 2 * (prev_high - pivot)
-
-        return pivot, r1, r2, r3, s1, s2, s3
-
-    def find_nearest_level(self, price: float, levels: List[float]) -> float:
-        """Find the nearest support/resistance level to the current price.
-
-        Args:
-            price: Current price
-            levels: List of support/resistance levels
-
-        Returns:
-            Nearest level to the current price
-        """
-        return min(levels, key=lambda x: abs(x - price))
-
-    def format_for_llm(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """Format market data for LLM analysis."""
-        llm_data: List[Dict[str, Any]] = []
-
-        try:
-            i = len(df) - 1
-            current_price = df["close"].iloc[i]
-
-            # Calculate multi-period changes
-            price_change_1w = 0.0
-            price_change_2w = 0.0
-            price_change_1m = 0.0
-            price_change_6m = 0.0
-
-            if i >= 5:
-                price_change_1w = float(df["close"].iloc[i] / df["close"].iloc[i - 5] - 1)
-            if i >= 10:
-                price_change_2w = float(df["close"].iloc[i] / df["close"].iloc[i - 10] - 1)
-            if i >= 21:
-                price_change_1m = float(df["close"].iloc[i] / df["close"].iloc[i - 21] - 1)
-            if i >= 126:
-                price_change_6m = float(df["close"].iloc[i] / df["close"].iloc[i - 126] - 1)
-            else:
-                logger.error(f"Not enough data points for 6 month change. Need 126 points, have {i + 1}")
-
-            current_data = {
-                "timestamp": df.index[i].strftime("%Y-%m-%d %H:%M"),
-                "price_data": {
-                    "open": float(df["open"].iloc[i]),
-                    "high": float(df["high"].iloc[i]),
-                    "low": float(df["low"].iloc[i]),
-                    "close": float(current_price),
-                    "volume": float(df["volume"].iloc[i]),
-                    "price_changes": {
-                        "1w": price_change_1w,
-                        "2w": price_change_2w,
-                        "1m": price_change_1m,
-                        "6m": price_change_6m,
-                    },
-                },
-                "historical_context": {
-                    "price_trend": "up" if df["close"].iloc[i] > df["SMA_20"].iloc[i] else "down",
-                    "volume_trend": (
-                        "high"
-                        if df["volume_ratio"].iloc[i] > 1.5
-                        else "low"
-                        if df["volume_ratio"].iloc[i] < 0.5
-                        else "normal"
-                    ),
-                    "volatility_state": (
-                        "high"
-                        if df["volatility"].iloc[i] > df["volatility"].rolling(self._volatility_window).mean().iloc[i]
-                        else "low"
-                    ),
-                    "rsi_state": (
-                        "overbought"
-                        if df["RSI"].iloc[i] > self._rsi_overbought
-                        else "oversold"
-                        if df["RSI"].iloc[i] < self._rsi_oversold
-                        else "neutral"
-                    ),
-                    "trend_strength": (
-                        "strong"
-                        if abs(price_change_6m) > self._trend_strong
-                        else "moderate"
-                        if abs(price_change_6m) > self._trend_moderate
-                        else "weak"
-                    ),
-                },
-            }
-
-            # Add previous periods' data
-            current_data["previous_periods"] = []
-            for j in range(1, min(self._historical_window + 1, i + 1)):
-                prev_data = {
-                    "timestamp": df.index[i - j].strftime("%Y-%m-%d %H:%M"),
-                    "close": float(df["close"].iloc[i - j]),
-                    "volume": float(df["volume"].iloc[i - j]),
-                    "rsi": float(df["RSI"].iloc[i - j]),
-                    "macd": float(df["MACD"].iloc[i - j]),
-                }
-                current_data["previous_periods"].append(prev_data)
-
-            llm_data.append(current_data)
-
-        except Exception as e:
-            logger.error(f"Error processing data point: {str(e)}")
-            logger.error(f"DataFrame info:\n{df.info()}")
-            logger.error(f"DataFrame head:\n{df.head()}")
-            raise ValueError(f"Failed to process data: {str(e)}")
-
-        if not llm_data:
-            logger.warning("No valid data points could be processed")
-            return []
-
-        return llm_data
 
     def query_ollama(self, prompt: str, env: TradingEnvironment) -> Optional[str]:
         """Query Ollama API for trading analysis."""
@@ -272,7 +127,7 @@ class LLMAnalyzer:
         analysis["current_price"] = market_data_analysis_df["price_data"]["close"]
         analysis["symbol"] = market_data_analysis_df.get("symbol")
         logger.debug(f"Raw response: {analysis}")
-        analysis = self.prompt_validation_and_formatting(analysis)
+        analysis = self.analysis_validation_and_formatting(analysis)
         logger.debug(f"LLM response: {analysis}")
 
         return analysis
@@ -289,7 +144,7 @@ class LLMAnalyzer:
         except json.JSONDecodeError as e:
             raise Exception(f"Failed to parse JSON response: {e}")
 
-    def prompt_validation_and_formatting(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def analysis_validation_and_formatting(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and format LLM response."""
         logger.info("   . Validating and formatting LLM JSON response")
 
