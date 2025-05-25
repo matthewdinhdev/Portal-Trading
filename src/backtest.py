@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
@@ -12,17 +13,22 @@ from logger import setup_logger
 from trading_enums import TradingEnvironment
 from utility import (
     TRADING_STRATEGY,
-    analyze_symbol,
-    calculate_position_size,
-    get_historical_data,
+    MarketDataManager,
 )
 
 # Set up logger
 logger = setup_logger("backtest.log")
 
+# Setup market data manager
+market_data_manager = MarketDataManager()
+
+# Suppress all matplotlib logging
+logging.getLogger("matplotlib").setLevel(logging.CRITICAL)
+
 # Constants
 TEST_START_DATE = datetime(2017, 1, 4)
-TEST_END_DATE = datetime(2021, 1, 4)
+TEST_END_DATE = datetime(2017, 4, 4)
+# TEST_END_DATE = datetime(2021, 1, 4)
 
 
 class Trade:
@@ -149,7 +155,7 @@ class LLMStrategy(bt.Strategy):
         logger.info(f" . Lookback start date: {lookback_start}")
 
         # Get historical data directly - only up to test start date
-        self.data_window = get_historical_data(
+        self.data_window = market_data_manager.get_historical_data(
             symbol=self.data._name,
             start_date=lookback_start,
             end_date=TEST_START_DATE,  # Only get data up to test start
@@ -220,7 +226,7 @@ class LLMStrategy(bt.Strategy):
 
         # Calculate position size using utility function
         current_price = self.data.close[0]
-        size = calculate_position_size(
+        size = market_data_manager.calculate_position_size(
             confidence=analysis["confidence"], available_cash=self.broker.getcash(), current_price=current_price
         )
 
@@ -305,7 +311,7 @@ class LLMStrategy(bt.Strategy):
             return
 
         # Get LLM analysis using utility function
-        result = analyze_symbol(
+        result = market_data_manager.analyze_symbol(
             symbol=self.data._name,
             data=self.data_window,
             env=TradingEnvironment.BACKTEST,
@@ -335,7 +341,7 @@ def run_backtest(
         f"Running backtest for {symbol} from {TEST_START_DATE.strftime('%Y-%m-%d')} to {TEST_END_DATE.strftime('%Y-%m-%d')}"
     )
 
-    df = get_historical_data(symbol, TEST_START_DATE, TEST_END_DATE)
+    df = market_data_manager.get_historical_data(symbol, TEST_START_DATE, TEST_END_DATE)
 
     if df.empty:
         raise ValueError("No historical data available for the specified date range")
@@ -592,7 +598,7 @@ def main() -> None:
             logger.info(f"Exit Reason: {trade['exit_reason']}")
 
         # Get historical data for plotting
-        df = get_historical_data("SPY", TEST_START_DATE, TEST_END_DATE)
+        df = market_data_manager.get_historical_data("SPY", TEST_START_DATE, TEST_END_DATE)
 
         # Plot trades
         plot_trades(df, results["trades"], "SPY")

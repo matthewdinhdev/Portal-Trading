@@ -19,9 +19,7 @@ from logger import setup_logger
 from trading_enums import TradingEnvironment
 from utility import (
     TRADING_STRATEGY,
-    analyze_symbol,
-    calculate_position_size,
-    get_historical_data,
+    MarketDataManager,
 )
 
 # Set up logger
@@ -45,6 +43,9 @@ args = parser.parse_args()
 
 # Load environment variables
 load_dotenv()
+
+# Initialize market data manager
+market_data_manager = MarketDataManager()
 
 # Initialize Alpaca clients
 API_KEY = os.getenv("ALPACA_API_KEY")
@@ -214,8 +215,8 @@ def execute_trade(analysis: Dict[str, Any], account_info: Dict[str, Any]) -> Non
     stop_loss = price_targets["stop_loss"]
     take_profit = price_targets["take_profit"]
 
-    # Calculate quantity using utility function
-    qty = calculate_position_size(
+    # Calculate quantity using market data manager
+    qty = market_data_manager.calculate_position_size(
         confidence=analysis["confidence"],
         available_cash=float(account_info["cash"]),
         current_price=analysis["current_price"],
@@ -308,10 +309,12 @@ def main() -> None:
             # Get historical data
             end_date = current_time - timedelta(days=1)  # Use previous day's close
             start_date = end_date - timedelta(days=TRADING_STRATEGY["lookback_periods"])
-            df = get_historical_data(symbol, start_date, end_date)
+            df = market_data_manager.get_historical_data(symbol, start_date, end_date)
 
             # Get analysis
-            result = analyze_symbol(symbol=symbol, data=df, env=env, save_analysis=not args.dont_save_analysis)
+            result = market_data_manager.analyze_symbol(
+                symbol=symbol, data=df, env=env, save_analysis=not args.dont_save_analysis
+            )
 
             if result:
                 execute_trade(result["analysis"], account_info)

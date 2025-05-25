@@ -2,11 +2,12 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 
+from technical_analysis import TechnicalAnalysis
 from trading_enums import TradingEnvironment
 
 # This logger will inherit all settings from the root logger
@@ -29,6 +30,45 @@ class LLMAnalyzer:
     def __init__(self, env: TradingEnvironment):
         """Initialize the LLM Analyzer."""
         self.env = env
+
+    def calculate_pivot_points(self, df: pd.DataFrame) -> Tuple[float, float, float, float, float, float, float]:
+        """Calculate pivot points and support/resistance levels.
+
+        Args:
+            df: DataFrame with OHLC data
+
+        Returns:
+            Tuple of (Pivot, R1, R2, R3, S1, S2, S3)
+        """
+        # Get previous day's data
+        prev_high = df["high"].iloc[-2]
+        prev_low = df["low"].iloc[-2]
+        prev_close = df["close"].iloc[-2]
+
+        # Calculate pivot point
+        pivot = (prev_high + prev_low + prev_close) / 3
+
+        # Calculate support and resistance levels
+        r1 = (2 * pivot) - prev_low
+        s1 = (2 * pivot) - prev_high
+        r2 = pivot + (prev_high - prev_low)
+        s2 = pivot - (prev_high - prev_low)
+        r3 = prev_high + 2 * (pivot - prev_low)
+        s3 = prev_low - 2 * (prev_high - pivot)
+
+        return pivot, r1, r2, r3, s1, s2, s3
+
+    def find_nearest_level(self, price: float, levels: List[float]) -> float:
+        """Find the nearest support/resistance level to the current price.
+
+        Args:
+            price: Current price
+            levels: List of support/resistance levels
+
+        Returns:
+            Nearest level to the current price
+        """
+        return min(levels, key=lambda x: abs(x - price))
 
     def format_for_llm(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
         """Format market data for LLM analysis."""
@@ -470,16 +510,8 @@ class LLMAnalyzer:
             # Get the most recent data point
             current = llm_data[-1]
 
-            # Calculate support and resistance levels safely
-            recent_lows = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
-            recent_highs = [period["close"] for period in current["previous_periods"][:24] if "close" in period]
-
-            if not recent_lows or not recent_highs:
-                logger.warning("Insufficient data for support/resistance calculation")
-                return None
-
-            support_level = min(recent_lows)
-            resistance_level = max(recent_highs)
+            # Calculate support and resistance levels using the new TechnicalAnalysis class
+            support_level, resistance_level = TechnicalAnalysis.get_support_resistance_levels(df, current_price)
 
             # Format the prompt with clear sections and better readability
             prompt = [
