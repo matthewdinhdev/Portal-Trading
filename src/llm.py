@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import requests
 
-from technical_analysis import TechnicalAnalysis
 from trading_enums import TradingEnvironment
 
 # This logger will inherit all settings from the root logger
@@ -192,12 +191,14 @@ class LLMAnalyzer:
         cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
         return cleaned_response
 
-    def get_llm_response(self, df: pd.DataFrame, env: TradingEnvironment) -> Optional[Dict[str, Any]]:
+    def get_llm_response(
+        self, market_data_analysis_df: Dict[str, Any], env: TradingEnvironment
+    ) -> Optional[Dict[str, Any]]:
         """Get trading analysis from LLM."""
         logger.info(" . Generating LLM response")
 
         # generate stat information for prompt
-        stat_info = self.generate_statistical_context(df)
+        stat_info = self.generate_statistical_context(market_data_analysis_df)
         if not stat_info:
             raise ValueError("Failed to generate stat information")
 
@@ -268,8 +269,8 @@ class LLMAnalyzer:
             return None
 
         analysis = self.load_analysis_to_json(response_text)
-        analysis["current_price"] = df["close"].iloc[-1]
-        analysis["symbol"] = df.name
+        analysis["current_price"] = market_data_analysis_df["price_data"]["close"]
+        analysis["symbol"] = market_data_analysis_df.get("symbol")
         logger.debug(f"Raw response: {analysis}")
         analysis = self.prompt_validation_and_formatting(analysis)
         logger.debug(f"LLM response: {analysis}")
@@ -406,11 +407,11 @@ class LLMAnalyzer:
         logger.info(f" . No existing analysis found for {symbol} at {filepath}")
         return None
 
-    def generate_statistical_context(self, df: pd.DataFrame) -> Optional[str]:
+    def generate_statistical_context(self, market_data_analysis_df: Dict[str, Any]) -> Optional[str]:
         """Format market data and generate trading analysis prompt for LLM.
 
         Args:
-            df: Market data and technical indicators
+            market_data: Dictionary containing market data and indicators
 
         Returns:
             Formatted prompt string or None if error
@@ -418,145 +419,49 @@ class LLMAnalyzer:
         try:
             logger.info("   . Generating LLM strategy prompt")
 
-            if df.empty:
+            if not market_data_analysis_df:
                 raise ValueError("   . No data available for strategy analysis")
 
-            # Format data for LLM
-            llm_data: List[Dict[str, Any]] = []
-            i = len(df) - 1
-            current_price = df["close"].iloc[i]
-
-            # Calculate multi-period changes
-            price_change_1w = 0.0
-            price_change_2w = 0.0
-            price_change_1m = 0.0
-            price_change_6m = 0.0
-
-            if i >= 5:
-                price_change_1w = float(df["close"].iloc[i] / df["close"].iloc[i - 5] - 1)
-            if i >= 10:
-                price_change_2w = float(df["close"].iloc[i] / df["close"].iloc[i - 10] - 1)
-            if i >= 21:
-                price_change_1m = float(df["close"].iloc[i] / df["close"].iloc[i - 21] - 1)
-            if i >= 126:
-                price_change_6m = float(df["close"].iloc[i] / df["close"].iloc[i - 126] - 1)
-            else:
-                logger.error(f"Not enough data points for 6 month change. Need 126 points, have {i + 1}")
-
-            current_data = {
-                "timestamp": df.index[i].strftime("%Y-%m-%d %H:%M"),
-                "price_data": {
-                    "open": float(df["open"].iloc[i]),
-                    "high": float(df["high"].iloc[i]),
-                    "low": float(df["low"].iloc[i]),
-                    "close": float(current_price),
-                    "volume": float(df["volume"].iloc[i]),
-                    "price_changes": {
-                        "1w": price_change_1w,
-                        "2w": price_change_2w,
-                        "1m": price_change_1m,
-                        "6m": price_change_6m,
-                    },
-                },
-                "historical_context": {
-                    "price_trend": "up" if df["close"].iloc[i] > df["SMA_20"].iloc[i] else "down",
-                    "volume_trend": (
-                        "high"
-                        if df["volume_ratio"].iloc[i] > 1.5
-                        else "low"
-                        if df["volume_ratio"].iloc[i] < 0.5
-                        else "normal"
-                    ),
-                    "volatility_state": (
-                        "high"
-                        if df["volatility"].iloc[i] > df["volatility"].rolling(self._volatility_window).mean().iloc[i]
-                        else "low"
-                    ),
-                    "rsi_state": (
-                        "overbought"
-                        if df["RSI"].iloc[i] > self._rsi_overbought
-                        else "oversold"
-                        if df["RSI"].iloc[i] < self._rsi_oversold
-                        else "neutral"
-                    ),
-                    "trend_strength": (
-                        "strong"
-                        if abs(price_change_6m) > self._trend_strong
-                        else "moderate"
-                        if abs(price_change_6m) > self._trend_moderate
-                        else "weak"
-                    ),
-                },
-            }
-
-            # Add previous periods' data
-            current_data["previous_periods"] = []
-            for j in range(1, min(self._historical_window + 1, i + 1)):
-                prev_data = {
-                    "timestamp": df.index[i - j].strftime("%Y-%m-%d %H:%M"),
-                    "close": float(df["close"].iloc[i - j]),
-                    "volume": float(df["volume"].iloc[i - j]),
-                    "rsi": float(df["RSI"].iloc[i - j]),
-                    "macd": float(df["MACD"].iloc[i - j]),
-                }
-                current_data["previous_periods"].append(prev_data)
-
-            llm_data.append(current_data)
-
-            if not llm_data:
-                logger.warning("No valid data points could be processed")
-                return None
-
-            # Get the most recent data point
-            current = llm_data[-1]
-
-            # Calculate support and resistance levels using the new TechnicalAnalysis class
-            support_level, resistance_level = TechnicalAnalysis.get_support_resistance_levels(df, current_price)
-
             # Format the prompt with clear sections and better readability
-            prompt = [
-                f"Trading Analysis ({current['timestamp']})",
-                "=" * 40,
-            ]
+            prompt = f"""Statistical Context ({market_data_analysis_df['timestamp']})
+            {'=' * 40}
 
-            # Add market data
-            prompt.extend(
-                [
-                    "",
-                    f"Current Market Conditions ({current['timestamp']}):",
-                    f"- Price: ${current['price_data']['close']:.2f}",
-                    f"- 1-Week Change: {current['price_data']['price_changes']['1w']*100:+.2f}%",
-                    f"- 2-Week Change: {current['price_data']['price_changes']['2w']*100:+.2f}%",
-                    f"- 1-Month Change: {current['price_data']['price_changes']['1m']*100:+.2f}%",
-                    f"- 6-Month Change: {current['price_data']['price_changes']['6m']*100:+.2f}%",
-                    "",
-                    "Price Levels:",
-                    f"- Support Level: ${support_level:.2f}",
-                    f"- Resistance Level: ${resistance_level:.2f}",
-                    "",
-                    "Technical Indicators:",
-                    f"- RSI: {current['historical_context']['rsi_state']}",
-                    f"- MACD: {current['historical_context']['volatility_state']}",
-                    f"- MACD Signal: {current['historical_context']['price_trend']}",
-                    f"- MACD Histogram: {current['historical_context']['volume_trend']}",
-                    f"- Stochastic K: {current['historical_context']['trend_strength']}",
-                    f"- Stochastic D: {current['historical_context']['rsi_state']}",
-                    f"- Volume Ratio: {current['historical_context']['volume_trend']}",
-                    f"- Volatility: {current['historical_context']['volatility_state']}",
-                    "",
-                    "Market Context:",
-                    f"- Price Trend: {current['historical_context']['price_trend']}",
-                    f"- Volume Trend: {current['historical_context']['volume_trend']}",
-                    f"- Volatility State: {current['historical_context']['volatility_state']}",
-                    f"- RSI State: {current['historical_context']['rsi_state']}",
-                    f"- Trend Strength: {current['historical_context']['trend_strength']}",
-                ]
-            )
-            final_prompt = "\n".join(prompt)
-            return final_prompt
+            Current Market Conditions ({market_data_analysis_df['timestamp']}):
+            - Price: ${market_data_analysis_df['price_data']['close']:.2f}
+            - 1-Week Change: {market_data_analysis_df['price_data']['price_changes']['1w']*100:+.2f}%
+            - 2-Week Change: {market_data_analysis_df['price_data']['price_changes']['2w']*100:+.2f}%
+            - 1-Month Change: {market_data_analysis_df['price_data']['price_changes']['1m']*100:+.2f}%
+            - 6-Month Change: {market_data_analysis_df['price_data']['price_changes']['6m']*100:+.2f}%
+
+            Price Levels:
+            - Support Level: ${market_data_analysis_df['price_data']['support_level']:.2f}
+            - Resistance Level: ${market_data_analysis_df['price_data']['resistance_level']:.2f}
+
+            Technical Indicators:
+            - RSI: {market_data_analysis_df['indicators']['momentum']['rsi']:.2f}
+            - MACD: {market_data_analysis_df['indicators']['momentum']['macd']:.2f}
+            - MACD Signal: {market_data_analysis_df['indicators']['momentum']['macd_signal']:.2f}
+            - MACD Histogram: {market_data_analysis_df['indicators']['momentum']['macd_hist']:.2f}
+            - Stochastic K: {market_data_analysis_df['indicators']['momentum']['stoch_k']:.2f}
+            - Stochastic D: {market_data_analysis_df['indicators']['momentum']['stoch_d']:.2f}
+            - Volume Ratio: {market_data_analysis_df['indicators']['volume']['volume_ratio']:.2f}
+            - Volatility: {market_data_analysis_df['indicators']['volatility']['volatility']:.2f}
+
+            Moving Averages:
+            - SMA 20: ${market_data_analysis_df['indicators']['moving_averages']['sma_20']:.2f}
+            - SMA 50: ${market_data_analysis_df['indicators']['moving_averages']['sma_50']:.2f}
+            - SMA 200: ${market_data_analysis_df['indicators']['moving_averages']['sma_200']:.2f}
+            - EMA 20: ${market_data_analysis_df['indicators']['moving_averages']['ema_20']:.2f}
+            - EMA 50: ${market_data_analysis_df['indicators']['moving_averages']['ema_50']:.2f}
+            - EMA 200: ${market_data_analysis_df['indicators']['moving_averages']['ema_200']:.2f}
+
+            Bollinger Bands:
+            - Upper: ${market_data_analysis_df['indicators']['bollinger_bands']['upper']:.2f}
+            - Middle: ${market_data_analysis_df['indicators']['bollinger_bands']['middle']:.2f}
+            - Lower: ${market_data_analysis_df['indicators']['bollinger_bands']['lower']:.2f}"""
+
+            return prompt
 
         except Exception as e:
             logger.error(f"Error generating LLM prompt: {str(e)}")
-            logger.error(f"DataFrame info:\n{df.info()}")
-            logger.error(f"DataFrame head:\n{df.head()}")
             return None

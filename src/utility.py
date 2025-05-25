@@ -10,7 +10,7 @@ from alpaca.data.timeframe import TimeFrame
 from dotenv import load_dotenv
 
 import llm
-from technical_analysis import calculate_all_indicators
+from technical_analysis import TechnicalAnalysis
 from trading_enums import TradingEnvironment
 
 # Load environment variables
@@ -105,17 +105,16 @@ class MarketDataManager:
         if existing_analysis:
             analysis = existing_analysis
         else:
-            # Calculate indicators and get analysis
-            df = calculate_all_indicators(data)
-            df.name = symbol  # Set the DataFrame's name attribute
-            logger.info(df.head(10))
+            # Get market analysis
+            market_data_analysis = TechnicalAnalysis.get_current_market_data(data)
+            market_data_analysis["symbol"] = symbol
 
             analysis = None
             error = None
             MAX_RETRIES = 3
             for i in range(MAX_RETRIES):
                 try:
-                    analysis = llm_instance.get_llm_response(df, env=env)
+                    analysis = llm_instance.get_llm_response(market_data_analysis, env=env)
                     if analysis:
                         break
                 except Exception as e:

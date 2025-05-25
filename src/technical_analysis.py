@@ -1,5 +1,5 @@
 import logging
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -79,6 +79,91 @@ class TechnicalAnalysis:
             support_level = max([s for s in [s1, s2, s3] if s < current_price], default=s1)
 
         return support_level, resistance_level
+
+    @staticmethod
+    def calculate_price_changes(df: pd.DataFrame) -> Dict[str, float]:
+        """Calculate multi-period price changes.
+
+        Args:
+            df: DataFrame with OHLC data
+
+        Returns:
+            Dictionary of price changes for different periods
+        """
+        i = len(df) - 1
+        price_changes = {"1w": 0.0, "2w": 0.0, "1m": 0.0, "6m": 0.0}
+
+        if i >= 5:
+            price_changes["1w"] = float(df["close"].iloc[i] / df["close"].iloc[i - 5] - 1)
+        if i >= 10:
+            price_changes["2w"] = float(df["close"].iloc[i] / df["close"].iloc[i - 10] - 1)
+        if i >= 21:
+            price_changes["1m"] = float(df["close"].iloc[i] / df["close"].iloc[i - 21] - 1)
+        if i >= 126:
+            price_changes["6m"] = float(df["close"].iloc[i] / df["close"].iloc[i - 126] - 1)
+
+        return price_changes
+
+    @staticmethod
+    def get_current_market_data(df: pd.DataFrame) -> Dict[str, Any]:
+        """Get current market data including price, volume, and indicators.
+
+        Args:
+            df: DataFrame with OHLC and indicator data
+
+        Returns:
+            Dictionary containing current market data
+        """
+        i = len(df) - 1
+        current_price = df["close"].iloc[i]
+
+        # Calculate support and resistance levels
+        support_level, resistance_level = TechnicalAnalysis.get_support_resistance_levels(df, current_price)
+
+        # Calculate all indicators
+        df = calculate_all_indicators(df)
+
+        return {
+            "timestamp": df.index[i].strftime("%Y-%m-%d %H:%M"),
+            "price_data": {
+                "open": float(df["open"].iloc[i]),
+                "high": float(df["high"].iloc[i]),
+                "low": float(df["low"].iloc[i]),
+                "close": float(current_price),
+                "volume": float(df["volume"].iloc[i]),
+                "price_changes": TechnicalAnalysis.calculate_price_changes(df),
+                "support_level": float(support_level),
+                "resistance_level": float(resistance_level),
+            },
+            "indicators": {
+                "bollinger_bands": {
+                    "upper": float(df["BB_upper"].iloc[i]),
+                    "middle": float(df["BB_middle"].iloc[i]),
+                    "lower": float(df["BB_lower"].iloc[i]),
+                },
+                "moving_averages": {
+                    "sma_20": float(df["SMA_20"].iloc[i]),
+                    "sma_50": float(df["SMA_50"].iloc[i]),
+                    "sma_200": float(df["SMA_200"].iloc[i]),
+                    "ema_20": float(df["EMA_20"].iloc[i]),
+                    "ema_50": float(df["EMA_50"].iloc[i]),
+                    "ema_200": float(df["EMA_200"].iloc[i]),
+                },
+                "momentum": {
+                    "rsi": float(df["RSI"].iloc[i]),
+                    "macd": float(df["MACD"].iloc[i]),
+                    "macd_signal": float(df["MACD_signal"].iloc[i]),
+                    "macd_hist": float(df["MACD_hist"].iloc[i]),
+                    "stoch_k": float(df["%K"].iloc[i]),
+                    "stoch_d": float(df["%D"].iloc[i]),
+                },
+                "volatility": {"atr": float(df["ATR"].iloc[i]), "volatility": float(df["volatility"].iloc[i])},
+                "volume": {
+                    "volume_ma": float(df["volume_ma_20"].iloc[i]),
+                    "volume_ratio": float(df["volume_ratio"].iloc[i]),
+                },
+            },
+        }
 
 
 class PriceIndicators:
