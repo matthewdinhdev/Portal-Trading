@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+import talib
 
 # Get logger
 logger = logging.getLogger(__name__)
@@ -171,54 +172,42 @@ class PriceIndicators:
 
     @staticmethod
     def calculate_price_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate basic price-based indicators.
-
-        Args:
-            df: DataFrame containing price data with 'close' column.
-
-        Returns:
-            DataFrame with added 'returns' and 'log_returns' columns.
-        """
+        """Calculate price-based indicators"""
         df = df.copy()
-        df["returns"] = df["close"].pct_change(periods=1)
-        df["log_returns"] = np.log(df["close"] / df["close"].shift(1))
-        df["returns"] = df["returns"].fillna(0)
-        df["log_returns"] = df["log_returns"].fillna(0)
+
+        # Calculate returns using TA-Lib
+        df["returns"] = talib.ROCP(df["close"], timeperiod=1)
+        df["log_returns"] = np.log(1 + df["returns"])
+
         return df
 
     @staticmethod
     def calculate_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate various moving averages.
-
-        Args:
-            df: DataFrame containing price data with 'close' column.
-
-        Returns:
-            DataFrame with added SMA and EMA columns.
-        """
+        """Calculate various moving averages"""
         df = df.copy()
+
+        # Calculate SMAs
         for window in [5, 10, 20, 50, 200]:
-            df[f"SMA_{window}"] = df["close"].rolling(window=window).mean()
-            df[f"EMA_{window}"] = df["close"].ewm(span=window, adjust=False).mean()
+            df[f"SMA_{window}"] = talib.SMA(df["close"], timeperiod=window)
+            df[f"EMA_{window}"] = talib.EMA(df["close"], timeperiod=window)
+
         return df
 
     @staticmethod
     def calculate_bollinger_bands(df: pd.DataFrame, window: int = 20, num_std: float = 2) -> pd.DataFrame:
-        """Calculate Bollinger Bands.
-
-        Args:
-            df: DataFrame containing price data with 'close' column.
-            window: Number of periods for the moving average (default: 20).
-            num_std: Number of standard deviations for the bands (default: 2).
-
-        Returns:
-            DataFrame with added Bollinger Bands columns.
-        """
+        """Calculate Bollinger Bands"""
         df = df.copy()
-        df["BB_middle"] = df["close"].rolling(window=window).mean()
-        df["BB_std"] = df["close"].rolling(window=window).std()
-        df["BB_upper"] = df["BB_middle"] + (df["BB_std"] * num_std)
-        df["BB_lower"] = df["BB_middle"] - (df["BB_std"] * num_std)
+
+        # Calculate Bollinger Bands using TA-Lib
+        upper, middle, lower = talib.BBANDS(
+            df["close"], timeperiod=window, nbdevup=num_std, nbdevdn=num_std, matype=0  # 0 = SMA
+        )
+
+        df["BB_upper"] = upper
+        df["BB_middle"] = middle
+        df["BB_lower"] = lower
+        df["BB_std"] = (upper - lower) / (2 * num_std)
+
         return df
 
 
@@ -227,61 +216,45 @@ class MomentumIndicators:
 
     @staticmethod
     def calculate_rsi(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-        """Calculate Relative Strength Index (RSI).
-
-        Args:
-            df: DataFrame containing price data with 'close' column.
-            window: Number of periods for RSI calculation (default: 14).
-
-        Returns:
-            DataFrame with added 'RSI' column.
-        """
+        """Calculate RSI"""
         df = df.copy()
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-        rs = gain / loss
-        df["RSI"] = 100 - (100 / (1 + rs))
+        df["RSI"] = talib.RSI(df["close"], timeperiod=window)
         return df
 
     @staticmethod
     def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
-        """Calculate MACD and related indicators.
-
-        Args:
-            df: DataFrame containing price data with 'close' column.
-            fast: Period for fast EMA (default: 12).
-            slow: Period for slow EMA (default: 26).
-            signal: Period for signal line smoothing (default: 9).
-
-        Returns:
-            DataFrame with added MACD columns.
-        """
+        """Calculate MACD"""
         df = df.copy()
-        exp1 = df["close"].ewm(span=fast, adjust=False).mean()
-        exp2 = df["close"].ewm(span=slow, adjust=False).mean()
-        df["MACD"] = exp1 - exp2
-        df["MACD_signal"] = df["MACD"].ewm(span=signal, adjust=False).mean()
-        df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
+
+        # Calculate MACD using TA-Lib
+        macd, signal_line, hist = talib.MACD(df["close"], fastperiod=fast, slowperiod=slow, signalperiod=signal)
+
+        df["MACD"] = macd
+        df["MACD_signal"] = signal_line
+        df["MACD_hist"] = hist
+
         return df
 
     @staticmethod
     def calculate_stochastic(df: pd.DataFrame, k_window: int = 14, d_window: int = 3) -> pd.DataFrame:
-        """Calculate Stochastic Oscillator.
-
-        Args:
-            df: DataFrame containing price data with 'high', 'low', and 'close' columns.
-            k_window: Period for %K calculation (default: 14).
-            d_window: Period for %D smoothing (default: 3).
-
-        Returns:
-            DataFrame with added '%K' and '%D' columns.
-        """
+        """Calculate Stochastic Oscillator"""
         df = df.copy()
-        low_14 = df["low"].rolling(window=k_window).min()
-        high_14 = df["high"].rolling(window=k_window).max()
-        df["%K"] = 100 * ((df["close"] - low_14) / (high_14 - low_14))
-        df["%D"] = df["%K"].rolling(window=d_window).mean()
+
+        # Calculate Stochastic using TA-Lib
+        slowk, slowd = talib.STOCH(
+            df["high"],
+            df["low"],
+            df["close"],
+            fastk_period=k_window,
+            slowk_period=d_window,
+            slowk_matype=0,
+            slowd_period=d_window,
+            slowd_matype=0,
+        )
+
+        df["%K"] = slowk
+        df["%D"] = slowd
+
         return df
 
     @staticmethod
@@ -305,18 +278,18 @@ class VolumeIndicators:
 
     @staticmethod
     def calculate_volume_indicators(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-        """Calculate volume-based indicators.
-
-        Args:
-            df: DataFrame containing volume data with 'volume' column.
-            window: Period for volume moving average (default: 20).
-
-        Returns:
-            DataFrame with added volume indicator columns.
-        """
+        """Calculate volume-based indicators"""
         df = df.copy()
-        df["volume_ma_20"] = df["volume"].rolling(window=window).mean()
+
+        # Calculate volume moving average
+        df["volume_ma_20"] = talib.SMA(df["volume"], timeperiod=window)
+
+        # Calculate volume ratio
         df["volume_ratio"] = df["volume"] / df["volume_ma_20"]
+
+        # Add On Balance Volume (OBV)
+        df["OBV"] = talib.OBV(df["close"], df["volume"])
+
         return df
 
 
@@ -324,38 +297,23 @@ class VolatilityIndicators:
     """Class for volatility-based technical indicators."""
 
     @staticmethod
-    def calculate_atr(df: pd.DataFrame, window: int = 14) -> pd.DataFrame:
-        """Calculate Average True Range (ATR).
-
-        Args:
-            df: DataFrame containing price data with 'high', 'low', and 'close' columns.
-            window: Number of periods for ATR calculation (default: 14).
-
-        Returns:
-            DataFrame with added 'ATR' column.
-        """
-        df = df.copy()
-        high_low = df["high"] - df["low"]
-        high_close = np.abs(df["high"] - df["close"].shift())
-        low_close = np.abs(df["low"] - df["close"].shift())
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = np.max(ranges, axis=1)
-        df["ATR"] = true_range.rolling(window).mean()
-        return df
-
-    @staticmethod
     def calculate_volatility_indicators(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-        """Calculate volatility indicators.
-
-        Args:
-            df: DataFrame containing returns data with 'returns' column.
-            window: Period for volatility calculation (default: 20).
-
-        Returns:
-            DataFrame with added 'volatility' column.
-        """
+        """Calculate volatility indicators"""
         df = df.copy()
-        df["volatility"] = df["returns"].rolling(window=window).std() * np.sqrt(252)
+
+        # Calculate ATR
+        df["ATR"] = talib.ATR(df["high"], df["low"], df["close"], timeperiod=window)
+
+        # Calculate Normalized ATR
+        df["NATR"] = talib.NATR(df["high"], df["low"], df["close"], timeperiod=window)
+
+        # Calculate True Range
+        df["TRANGE"] = talib.TRANGE(df["high"], df["low"], df["close"])
+
+        # Calculate annualized volatility from returns
+        if "returns" in df.columns:
+            df["volatility"] = df["returns"].rolling(window=window).std() * np.sqrt(252)
+
         return df
 
 
@@ -378,10 +336,9 @@ def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = MomentumIndicators.calculate_rsi(df)
     df = MomentumIndicators.calculate_macd(df)
     df = MomentumIndicators.calculate_stochastic(df)
-    df = VolatilityIndicators.calculate_atr(df)
+    df = VolatilityIndicators.calculate_volatility_indicators(df)
     df = VolumeIndicators.calculate_volume_indicators(df)
     df = MomentumIndicators.calculate_momentum_indicators(df)
-    df = VolatilityIndicators.calculate_volatility_indicators(df)
 
     # Clean up NaN values
     df = df.bfill()
