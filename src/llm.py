@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from technical_analysis import TechnicalAnalysis
 from trading_enums import TradingEnvironment
 
 # This logger will inherit all settings from the root logger
@@ -15,65 +16,86 @@ logger = logging.getLogger(__name__)
 class LLMAnalyzer:
     # Private class variables
     _model_backtest = "deepseek-llm:7b"
+    # _model_backtest = "deepseek-r1:14b"
     _model_live = "deepseek-r1:14b"
+    _min_risk_reward_ratio = 1.5
+    _current_stat_info = None
+    _original_analysis = None
 
     def __init__(self, env: TradingEnvironment):
         """Initialize the LLM Analyzer."""
         self.env = env
+        self._original_analysis = None
 
-    def query_ollama(self, prompt: str, env: TradingEnvironment) -> Optional[str]:
-        """Query Ollama API for trading analysis."""
-        logger.info("   . Querying Ollama")
+    def query_ollama_generate(
+        self, prompt: str, env: TradingEnvironment, system_message: Optional[str] = None
+    ) -> Optional[str]:
+        """Query Ollama API for initial trading analysis using generate endpoint."""
+        logger.info("   . Querying Ollama (generate)")
         url = "http://localhost:11434/api/generate"
 
-        # live and paper trading use same model
         model = self._model_backtest if env == TradingEnvironment.BACKTEST else self._model_live
+
+        # Combine system message and prompt
+        full_prompt = f"{system_message}\n\n{prompt}" if system_message else prompt
+        logger.debug(f"Full prompt for generate:\n{full_prompt}")
 
         payload = {
             "model": model,
-            "prompt": prompt,
-            "stream": False,
+            "prompt": full_prompt,
             "options": {
                 "temperature": 0.1,
             },
         }
 
         response = requests.post(url, json=payload)
+        logger.debug(f"Response status: {response.status_code}")
         response.raise_for_status()
 
-        raw_response = response.json()["response"]
+        try:
+            # Handle streaming response
+            full_content = ""
+            for line in response.iter_lines():
+                if line:
+                    chunk = json.loads(line)
+                    if "response" in chunk:
+                        full_content += chunk["response"]
+                    if chunk.get("done", False):
+                        break
 
-        cleaned_response = "".join(char for char in raw_response if ord(char) >= 32 or char in "\n\r\t")
-        return cleaned_response
+            logger.debug(f"Full content: {full_content}")
+            return full_content
+        except Exception as e:
+            logger.error(f"Error processing response: {str(e)}")
+            logger.error(f"Response text: {response.text}")
+            raise
 
     def get_llm_response(
-        self, market_data_analysis_df: Dict[str, Any], env: TradingEnvironment
+        self, market_data_analysis: Dict[str, Any], env: TradingEnvironment
     ) -> Optional[Dict[str, Any]]:
         """Get trading analysis from LLM."""
         logger.info(" . Generating LLM response")
 
         # generate stat information for prompt
-        stat_info = self.generate_statistical_context(market_data_analysis_df)
-        if not stat_info:
+        self._current_stat_info = self.generate_statistical_context(market_data_analysis)
+        if not self._current_stat_info:
             raise ValueError("Failed to generate stat information")
 
+        # Reset original analysis for new analysis
+        self._original_analysis = None
+
         # generate prompt
-        prompt = f"""
+        system_message = """
         CRITICAL INSTRUCTIONS:
         1. You are a quantitative trading algorithm. Analyze the market data and generate a trading recommendation.
         2. Your response MUST be ONLY the JSON object below
-        3. The response must start with {{ and end with }}
+        3. The response must start with { and end with }
         4. Use this EXACT structure:
-        {{
+        {
             "recommendation": "BUY|SELL|HOLD",
-            "confidence": "0.0|0.1|0.2|0.3|0.4|0.5|0.6|0.7|0.8|0.9|1.0",
-            "reasoning": "string",
-            "price_targets": {{
-                "stop_loss": "positive_number (for BUY: below entry, for SELL: above entry)",
-                "take_profit": "positive_number (for BUY: above entry, for SELL: below entry)"
-            }}
-        }}
-        5. DO NOT include any thinking process or tags like <thinking> or </thinking>. IT MUST FOLLOW THE EXACT STRUCTURE ABOVE.
+            "confidence": 0.0|0.1|0.2|0.3|0.4|0.5|0.6|0.7|0.8|0.9|1.0,
+            "reasoning": "string"
+        }
 
         TRADING GUIDELINES:
         1. Analyze the provided market data thoroughly, including:
@@ -85,50 +107,83 @@ class LLMAnalyzer:
            - Volatility patterns
 
         2. Make trading decisions based on your analysis:
-           - BUY when you identify ANY bullish opportunity with 10%+ profit potential
-           - SELL when you identify ANY bearish opportunity with 10%+ profit potential
+           - BUY when you identify ANY bullish opportunity
+           - SELL when you identify ANY bearish opportunity 
            - HOLD only when market conditions are extremely unfavorable or unpredictable
            - Take trades more frequently, even with moderate confidence
            - Look for momentum and trend continuation opportunities
            - Don't be afraid to trade against the trend if you see a reversal opportunity
-
-        3. Size your position based on:
-           - Your confidence in the trade
-           - Risk/reward ratio (aim for at least 1.5:1)
-           - Market volatility
-           - Overall market conditions
-
-        4. Set price targets that:
-           - For BUY trades:
-             * Stop loss must be BELOW entry price
-             * Take profit must be ABOVE entry price
-             * Target at least 10% profit potential
-             * Be more aggressive with take profit levels
-           - For SELL trades:
-             * Stop loss must be ABOVE entry price
-             * Take profit must be BELOW entry price
-             * Target at least 10% profit potential
-             * Be more aggressive with take profit levels
-           - Account for volatility
-           - Provide favorable risk/reward ratios (minimum 1.5:1)
-           - Consider support/resistance levels
-           - Set stop loss at logical support/resistance levels
-
-        {stat_info}
         """
 
-        logger.debug(f"Prompt: {prompt}")
-        response_text = self.query_ollama(prompt, env)
+        user_message = f"""
+        Please analyze this market data and provide a trading recommendation:
+        {self._current_stat_info}
+        """
+
+        # Store the original analysis prompt
+        self._original_analysis = {"system": system_message, "prompt": user_message}
+
+        response_text = self.query_ollama_generate(user_message, env, system_message)
         if not response_text:
             logger.error("No response from Ollama")
             return None
 
+        # Store the original analysis response
+        self._original_analysis["response"] = response_text
+
         analysis = self.load_analysis_to_json(response_text)
-        analysis["current_price"] = market_data_analysis_df["price_data"]["close"]
-        analysis["symbol"] = market_data_analysis_df.get("symbol")
-        logger.debug(f"Raw response: {analysis}")
+
+        # Add additional parameters before validation
+        analysis = self.add_analysis_parameters(analysis, market_data_analysis)
+
+        # Validate and format the complete analysis
         analysis = self.analysis_validation_and_formatting(analysis)
         logger.debug(f"LLM response: {analysis}")
+
+        return analysis
+
+    def add_analysis_parameters(self, analysis: Dict[str, Any], market_data_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Add additional parameters to the analysis, including price targets.
+
+        Args:
+            analysis: The base analysis dictionary
+            market_data_analysis: The market data dictionary
+
+        Returns:
+            Dictionary with additional parameters added
+        """
+        logger.info("   . Adding additional analysis parameters")
+
+        # Add current price and symbol
+        analysis["current_price"] = market_data_analysis["price_data"]["close"]
+        analysis["symbol"] = market_data_analysis.get("symbol")
+
+        # If HOLD, we don't need price targets
+        if analysis["recommendation"] == "HOLD":
+            return analysis
+
+        # Get Fibonacci levels and ATR from market data
+        fib_levels = market_data_analysis["price_data"]["fibonacci_levels"]
+        atr = market_data_analysis["indicators"]["volatility"]["atr"]
+
+        if not fib_levels:
+            raise ValueError("No Fibonacci levels available in market data")
+        if not atr or atr <= 0:
+            raise ValueError("Invalid ATR value in market data")
+
+        # Add ATR to fib_levels dict for fallback
+        fib_levels["atr"] = atr
+
+        # Calculate price targets
+        price_targets = TechnicalAnalysis.calculate_price_targets_from_fib(
+            current_price=analysis["current_price"],
+            fib_levels=fib_levels,
+            recommendation=analysis["recommendation"],
+            min_risk_reward=self._min_risk_reward_ratio,
+        )
+
+        # Add price targets to analysis
+        analysis["price_targets"] = price_targets
 
         return analysis
 
@@ -144,7 +199,7 @@ class LLMAnalyzer:
         except json.JSONDecodeError as e:
             raise Exception(f"Failed to parse JSON response: {e}")
 
-    def analysis_validation_and_formatting(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def analysis_validation_and_formatting(self, analysis: Dict[str, Any], retry_count: int = 0) -> Dict[str, Any]:
         """Validate and format LLM response."""
         logger.info("   . Validating and formatting LLM JSON response")
 
@@ -153,7 +208,6 @@ class LLMAnalyzer:
             "recommendation",
             "confidence",
             "reasoning",
-            "price_targets",
             "current_price",
         ]
         for field in required_fields:
@@ -165,10 +219,6 @@ class LLMAnalyzer:
         analysis["recommendation"] = analysis["recommendation"].upper()
         analysis["current_price"] = float(str(analysis["current_price"]).replace("$", ""))
 
-        # format field values
-        analysis["price_targets"]["take_profit"] = float(str(analysis["price_targets"]["take_profit"]).replace("$", ""))
-        analysis["price_targets"]["stop_loss"] = float(str(analysis["price_targets"]["stop_loss"]).replace("$", ""))
-
         # check if recommendation is valid
         if analysis["recommendation"] not in ["BUY", "SELL", "HOLD"]:
             raise ValueError(f"Invalid recommendation: {analysis['recommendation']}")
@@ -177,23 +227,13 @@ class LLMAnalyzer:
         if not 0 <= analysis["confidence"] <= 1:
             raise ValueError(f"Invalid confidence: {analysis['confidence']}. Must be between 0 and 1")
 
-        # check if price targets are valid
-        if "stop_loss" not in analysis["price_targets"] or "take_profit" not in analysis["price_targets"]:
-            raise ValueError("Missing required price targets")
+        # If HOLD, we don't need price targets
+        if analysis["recommendation"] == "HOLD":
+            return analysis
 
-        # check if stop loss is less than take profit for BUY
-        if (
-            analysis["recommendation"] == "BUY"
-            and analysis["price_targets"]["stop_loss"] >= analysis["price_targets"]["take_profit"]
-        ):
-            raise ValueError("Stop loss must be less than take profit for a BUY trade")
-
-        # check if stop loss is greater than take profit for SELL
-        if (
-            analysis["recommendation"] == "SELL"
-            and analysis["price_targets"]["stop_loss"] <= analysis["price_targets"]["take_profit"]
-        ):
-            raise ValueError("Stop loss must be greater than take profit for a SELL trade")
+        # Price targets should already be added by add_analysis_parameters
+        if "price_targets" not in analysis:
+            raise ValueError("Price targets not found in analysis")
 
         return analysis
 
@@ -263,35 +303,41 @@ class LLMAnalyzer:
         return None
 
     def generate_statistical_context(self, market_data_analysis_df: Dict[str, Any]) -> Optional[str]:
-        """Format market data and generate trading analysis prompt for LLM.
-
-        Args:
-            market_data: Dictionary containing market data and indicators
-
-        Returns:
-            Formatted prompt string or None if error
-        """
+        """Generate statistical context for LLM prompt."""
         try:
-            logger.info("   . Generating LLM strategy prompt")
+            # Get price data
+            price_data = market_data_analysis_df["price_data"]
+            current_price = price_data["close"]
 
-            if not market_data_analysis_df:
-                raise ValueError("   . No data available for strategy analysis")
+            # Format support and resistance levels
+            support_levels = price_data["support_levels"]
+            resistance_levels = price_data["resistance_levels"]
+            fib_levels = price_data["fibonacci_levels"]
 
-            # Format the prompt with clear sections and better readability
-            prompt = f"""Statistical Context ({market_data_analysis_df['timestamp']})
-            {'=' * 40}
-
-            Current Market Conditions ({market_data_analysis_df['timestamp']}):
-            - Price: ${market_data_analysis_df['price_data']['close']:.2f}
-            - 1-Week Change: {market_data_analysis_df['price_data']['price_changes']['1w']*100:+.2f}%
-            - 2-Week Change: {market_data_analysis_df['price_data']['price_changes']['2w']*100:+.2f}%
-            - 1-Month Change: {market_data_analysis_df['price_data']['price_changes']['1m']*100:+.2f}%
-            - 6-Month Change: {market_data_analysis_df['price_data']['price_changes']['6m']*100:+.2f}%
-
-            Price Levels:
-            - Support Level: ${market_data_analysis_df['price_data']['support_level']:.2f}
-            - Resistance Level: ${market_data_analysis_df['price_data']['resistance_level']:.2f}
-
+            # Format the context
+            context = f"""
+            MARKET DATA:
+            Current Price: ${current_price:.2f}
+            
+            Support Levels:
+            - Short-term (30 days): {', '.join([f'${s:.2f}' for s in support_levels['short_term']])}
+            - Medium-term (90 days): {', '.join([f'${s:.2f}' for s in support_levels['medium_term']])}
+            - Long-term (180 days): {', '.join([f'${s:.2f}' for s in support_levels['long_term']])}
+            
+            Resistance Levels:
+            - Short-term (30 days): {', '.join([f'${r:.2f}' for r in resistance_levels['short_term']])}
+            - Medium-term (90 days): {', '.join([f'${r:.2f}' for r in resistance_levels['medium_term']])}
+            - Long-term (180 days): {', '.join([f'${r:.2f}' for r in resistance_levels['long_term']])}
+            
+            Fibonacci Levels:
+            - 0.0: ${fib_levels['0.0']:.2f}
+            - 0.236: ${fib_levels['0.236']:.2f}
+            - 0.382: ${fib_levels['0.382']:.2f}
+            - 0.5: ${fib_levels['0.5']:.2f}
+            - 0.618: ${fib_levels['0.618']:.2f}
+            - 0.786: ${fib_levels['0.786']:.2f}
+            - 1.0: ${fib_levels['1.0']:.2f}
+            
             Technical Indicators:
             - RSI: {market_data_analysis_df['indicators']['momentum']['rsi']:.2f}
             - MACD: {market_data_analysis_df['indicators']['momentum']['macd']:.2f}
@@ -301,22 +347,24 @@ class LLMAnalyzer:
             - Stochastic D: {market_data_analysis_df['indicators']['momentum']['stoch_d']:.2f}
             - Volume Ratio: {market_data_analysis_df['indicators']['volume']['volume_ratio']:.2f}
             - Volatility: {market_data_analysis_df['indicators']['volatility']['volatility']:.2f}
-
+            - ATR: {market_data_analysis_df['indicators']['volatility']['atr']:.2f}
+            
             Moving Averages:
-            - SMA 20: ${market_data_analysis_df['indicators']['moving_averages']['sma_20']:.2f}
-            - SMA 50: ${market_data_analysis_df['indicators']['moving_averages']['sma_50']:.2f}
-            - SMA 200: ${market_data_analysis_df['indicators']['moving_averages']['sma_200']:.2f}
-            - EMA 20: ${market_data_analysis_df['indicators']['moving_averages']['ema_20']:.2f}
-            - EMA 50: ${market_data_analysis_df['indicators']['moving_averages']['ema_50']:.2f}
-            - EMA 200: ${market_data_analysis_df['indicators']['moving_averages']['ema_200']:.2f}
-
+            - SMA 20: {market_data_analysis_df['indicators']['moving_averages']['sma_20']:.2f}
+            - SMA 50: {market_data_analysis_df['indicators']['moving_averages']['sma_50']:.2f}
+            - SMA 200: {market_data_analysis_df['indicators']['moving_averages']['sma_200']:.2f}
+            - EMA 20: {market_data_analysis_df['indicators']['moving_averages']['ema_20']:.2f}
+            - EMA 50: {market_data_analysis_df['indicators']['moving_averages']['ema_50']:.2f}
+            - EMA 200: {market_data_analysis_df['indicators']['moving_averages']['ema_200']:.2f}
+            
             Bollinger Bands:
-            - Upper: ${market_data_analysis_df['indicators']['bollinger_bands']['upper']:.2f}
-            - Middle: ${market_data_analysis_df['indicators']['bollinger_bands']['middle']:.2f}
-            - Lower: ${market_data_analysis_df['indicators']['bollinger_bands']['lower']:.2f}"""
+            - Upper: {market_data_analysis_df['indicators']['bollinger_bands']['upper']:.2f}
+            - Middle: {market_data_analysis_df['indicators']['bollinger_bands']['middle']:.2f}
+            - Lower: {market_data_analysis_df['indicators']['bollinger_bands']['lower']:.2f}
+            """
 
-            return prompt
+            return context
 
         except Exception as e:
-            logger.error(f"Error generating LLM prompt: {str(e)}")
+            logger.error(f"Error generating statistical context: {str(e)}")
             return None

@@ -48,6 +48,7 @@ def setup_logger(log_file="trading.log"):
         backtest_dir = os.path.join(log_dir, "backtest")
         os.makedirs(backtest_dir, exist_ok=True)
         log_file = os.path.join(backtest_dir, log_file)
+        print(f"Backtest log file: {log_file}")
     elif "paper" in log_file:
         paper_dir = os.path.join(log_dir, "paper_trading")
         os.makedirs(paper_dir, exist_ok=True)

@@ -41,45 +41,81 @@ class TechnicalAnalysis:
         return pivot, r1, r2, r3, s1, s2, s3
 
     @staticmethod
-    def find_nearest_level(price: float, levels: List[float]) -> float:
-        """Find the nearest support/resistance level to the current price.
-
-        Args:
-            price: Current price
-            levels: List of support/resistance levels
-
-        Returns:
-            Nearest level to the current price
-        """
-        return min(levels, key=lambda x: abs(x - price))
-
-    @staticmethod
-    def get_support_resistance_levels(df: pd.DataFrame, current_price: float) -> Tuple[float, float]:
-        """Get the nearest support and resistance levels for the current price.
+    def find_historical_levels(df: pd.DataFrame) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
+        """Find historical support and resistance levels using price action.
 
         Args:
             df: DataFrame with OHLC data
-            current_price: Current price of the asset
 
         Returns:
-            Tuple of (support_level, resistance_level)
+            Tuple of (support_levels_dict, resistance_levels_dict) where each dict has keys:
+            - short_term (30 days)
+            - medium_term (90 days)
+            - long_term (180 days)
         """
-        # Calculate pivot points
-        pivot, r1, r2, r3, s1, s2, s3 = TechnicalAnalysis.calculate_pivot_points(df)
+        support_levels = {"short_term": [], "medium_term": [], "long_term": []}
+        resistance_levels = {"short_term": [], "medium_term": [], "long_term": []}
+        windows = {"short_term": 30, "medium_term": 90, "long_term": 180}
 
-        # Find nearest support and resistance levels
-        all_levels = [s3, s2, s1, pivot, r1, r2, r3]
-        nearest_level = TechnicalAnalysis.find_nearest_level(current_price, all_levels)
+        for timeframe, window in windows.items():
+            # Get the window of data
+            recent_data = df.tail(window)
 
-        # Determine if nearest level is support or resistance
-        if nearest_level < current_price:
-            support_level = nearest_level
-            resistance_level = min([r for r in [r1, r2, r3] if r > current_price], default=r1)
-        else:
-            resistance_level = nearest_level
-            support_level = max([s for s in [s1, s2, s3] if s < current_price], default=s1)
+            for i in range(1, len(recent_data) - 1):
+                # Check for local minima (potential support)
+                if (
+                    recent_data["low"].iloc[i] < recent_data["low"].iloc[i - 1]
+                    and recent_data["low"].iloc[i] < recent_data["low"].iloc[i + 1]
+                ):
+                    support_levels[timeframe].append(recent_data["low"].iloc[i])
 
-        return support_level, resistance_level
+                # Check for local maxima (potential resistance)
+                if (
+                    recent_data["high"].iloc[i] > recent_data["high"].iloc[i - 1]
+                    and recent_data["high"].iloc[i] > recent_data["high"].iloc[i + 1]
+                ):
+                    resistance_levels[timeframe].append(recent_data["high"].iloc[i])
+
+            # Cluster nearby levels to reduce noise
+            support_levels[timeframe] = TechnicalAnalysis._cluster_levels(support_levels[timeframe], threshold=0.01)
+            resistance_levels[timeframe] = TechnicalAnalysis._cluster_levels(
+                resistance_levels[timeframe], threshold=0.01
+            )
+
+        return support_levels, resistance_levels
+
+    @staticmethod
+    def _cluster_levels(levels: List[float], threshold: float = 0.02) -> List[float]:
+        """Cluster nearby price levels to reduce noise.
+
+        Args:
+            levels: List of price levels
+            threshold: Percentage threshold for clustering (default 2%)
+
+        Returns:
+            List of clustered price levels
+        """
+        if not levels:
+            return []
+
+        # Sort levels
+        levels = sorted(levels)
+        clustered = []
+        current_cluster = [levels[0]]
+
+        for level in levels[1:]:
+            # If level is within threshold of current cluster, add to cluster
+            if abs(level - current_cluster[0]) / current_cluster[0] <= threshold:
+                current_cluster.append(level)
+            else:
+                # Add average of current cluster to result
+                clustered.append(sum(current_cluster) / len(current_cluster))
+                current_cluster = [level]
+
+        # Add final cluster
+        clustered.append(sum(current_cluster) / len(current_cluster))
+
+        return clustered
 
     @staticmethod
     def calculate_price_changes(df: pd.DataFrame) -> Dict[str, float]:
@@ -106,6 +142,40 @@ class TechnicalAnalysis:
         return price_changes
 
     @staticmethod
+    def calculate_fibonacci_levels(df: pd.DataFrame, window: int = 180) -> Dict[str, float]:
+        """Calculate Fibonacci retracement levels from recent price action.
+
+        Args:
+            df: DataFrame with OHLC data
+            window: Number of periods to look back for high/low (default 20)
+
+        Returns:
+            Dictionary of Fibonacci levels (0.0 to 1.0)
+        """
+        # Get the window of data
+        recent_data = df.tail(window)
+
+        # Find the high and low in the period
+        high = recent_data["high"].max()
+        low = recent_data["low"].min()
+
+        # Calculate the range
+        price_range = high - low
+
+        # Calculate Fibonacci levels
+        levels = {
+            "0.0": low,
+            "0.236": low + 0.236 * price_range,
+            "0.382": low + 0.382 * price_range,
+            "0.5": low + 0.5 * price_range,
+            "0.618": low + 0.618 * price_range,
+            "0.786": low + 0.786 * price_range,
+            "1.0": high,
+        }
+
+        return levels
+
+    @staticmethod
     def get_current_market_data(df: pd.DataFrame) -> Dict[str, Any]:
         """Get current market data including price, volume, and indicators.
 
@@ -118,8 +188,11 @@ class TechnicalAnalysis:
         i = len(df) - 1
         current_price = df["close"].iloc[i]
 
-        # Calculate support and resistance levels
-        support_level, resistance_level = TechnicalAnalysis.get_support_resistance_levels(df, current_price)
+        # Get historical levels for all timeframes
+        support_levels, resistance_levels = TechnicalAnalysis.find_historical_levels(df)
+
+        # Calculate Fibonacci levels
+        fib_levels = TechnicalAnalysis.calculate_fibonacci_levels(df)
 
         # Calculate all indicators
         df = calculate_all_indicators(df)
@@ -133,8 +206,13 @@ class TechnicalAnalysis:
                 "close": float(current_price),
                 "volume": float(df["volume"].iloc[i]),
                 "price_changes": TechnicalAnalysis.calculate_price_changes(df),
-                "support_level": float(support_level),
-                "resistance_level": float(resistance_level),
+                "support_levels": {
+                    timeframe: [float(s) for s in levels] for timeframe, levels in support_levels.items()
+                },
+                "resistance_levels": {
+                    timeframe: [float(r) for r in levels] for timeframe, levels in resistance_levels.items()
+                },
+                "fibonacci_levels": {level: float(price) for level, price in fib_levels.items()},
             },
             "indicators": {
                 "bollinger_bands": {
@@ -165,6 +243,87 @@ class TechnicalAnalysis:
                 },
             },
         }
+
+    @staticmethod
+    def calculate_price_targets_from_fib(
+        current_price: float, fib_levels: Dict[str, float], recommendation: str, min_risk_reward: float = 1.5
+    ) -> Dict[str, float]:
+        """Calculate price targets using Fibonacci levels, falling back to ATR if risk/reward is insufficient.
+
+        Args:
+            current_price: Current price of the asset
+            fib_levels: Dictionary containing Fibonacci levels and ATR
+            recommendation: Trading recommendation ("BUY" or "SELL")
+            min_risk_reward: Minimum risk/reward ratio required to use Fibonacci levels (default: 1.5)
+
+        Returns:
+            Dictionary containing stop_loss and take_profit levels
+        """
+        # Get ATR for fallback
+        atr = fib_levels.get("atr", 0.0)
+        if atr <= 0:
+            raise ValueError("Invalid ATR value")
+
+        # Convert fib levels to sorted list for easier comparison
+        levels = [(float(level), price) for level, price in fib_levels.items() if level != "atr"]
+        levels.sort(key=lambda x: x[1])  # Sort by price
+
+        # Try Fibonacci levels first
+        if recommendation == "BUY":
+            # Find nearest fib level below current price for stop loss
+            stop_loss = None
+            for _, price in reversed(levels):
+                if price < current_price:
+                    stop_loss = price
+                    break
+
+            # Find nearest fib level above current price for take profit
+            take_profit = None
+            for _, price in levels:
+                if price > current_price:
+                    take_profit = price
+                    break
+
+        else:  # SELL
+            # Find nearest fib level above current price for stop loss
+            stop_loss = None
+            for _, price in levels:
+                if price > current_price:
+                    stop_loss = price
+                    break
+
+            # Find nearest fib level below current price for take profit
+            take_profit = None
+            for _, price in reversed(levels):
+                if price < current_price:
+                    take_profit = price
+                    break
+
+        # Check if we have valid Fibonacci targets
+        if stop_loss and take_profit:
+            # Calculate risk/reward ratio
+            if recommendation == "BUY":
+                risk = current_price - stop_loss
+                reward = take_profit - current_price
+            else:  # SELL
+                risk = stop_loss - current_price
+                reward = current_price - take_profit
+
+            risk_reward_ratio = reward / risk if risk > 0 else 0
+
+            # If risk/reward is good enough, use Fibonacci targets
+            if risk_reward_ratio >= min_risk_reward:
+                return {"stop_loss": round(stop_loss, 2), "take_profit": round(take_profit, 2)}
+
+        # Fall back to ATR-based targets if Fibonacci levels don't give good risk/reward
+        if recommendation == "BUY":
+            stop_loss = current_price - (2 * atr)  # 2 ATR for stop loss
+            take_profit = current_price + (3 * atr)  # 3 ATR for take profit
+        else:  # SELL
+            stop_loss = current_price + (2 * atr)  # 2 ATR for stop loss
+            take_profit = current_price - (3 * atr)  # 3 ATR for take profit
+
+        return {"stop_loss": round(stop_loss, 2), "take_profit": round(take_profit, 2)}
 
 
 class PriceIndicators:

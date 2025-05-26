@@ -92,7 +92,7 @@ class MarketDataManager:
         Returns:
             Optional[Dict[str, Any]]: Analysis results if there's a trading recommendation
         """
-        logger.info(f"Analyzing {symbol}")
+        logger.info(f"Analyzing {symbol} for timestamp {data.index[-1]}")
 
         # create llm instance
         llm_instance = llm.LLMAnalyzer(env=env)
@@ -111,7 +111,7 @@ class MarketDataManager:
 
             analysis = None
             error = None
-            MAX_RETRIES = 3
+            MAX_RETRIES = 2
             for i in range(MAX_RETRIES):
                 try:
                     analysis = llm_instance.get_llm_response(market_data_analysis, env=env)
@@ -119,8 +119,16 @@ class MarketDataManager:
                         break
                 except Exception as e:
                     error = e
+                    error_msg = str(e)
+
+                    # If it's a price correction failure, don't retry
+                    if "Failed to correct price targets after" in error_msg:
+                        logger.error(f"Price correction failed for {symbol}: {error_msg}")
+                        raise
+
                     logger.warning(f"Could not get analysis for {symbol} after {i+1} retries")
                     logger.warning(f"Error: {error}")
+
             if not analysis:
                 logger.error(f"Error: {error}")
                 raise Exception(f"Failed to get analysis for {symbol} after {MAX_RETRIES} retries: {error}")
