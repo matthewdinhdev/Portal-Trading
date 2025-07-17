@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 class LLMAnalyzer:
     # Private class variables
     _model_backtest = "deepseek-llm:7b"
-    # _model_backtest = "deepseek-r1:14b"
     _model_live = "deepseek-r1:14b"
     _min_risk_reward_ratio = 1.5
     _current_stat_info = None
